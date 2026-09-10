@@ -63,6 +63,51 @@ def _eval_tool_ready() -> bool:
     return has_mats and has_compiled_bbox
 
 
+def _print_tree(root: Path, max_entries: int = 300) -> None:
+    print(f"[dataset] directory tree under {root}:")
+    count = 0
+    for p in sorted(root.rglob("*")):
+        print(f"  {p.relative_to(root)}{'/' if p.is_dir() else ''}")
+        count += 1
+        if count >= max_entries:
+            print(f"  ... (truncated after {max_entries} entries)")
+            break
+
+
+def _find_split_dir(extracted_root: Path, download_dir: Path, split: str) -> Path:
+    """Locates the downloaded split's directory (val or train) even when
+    gdown's --folder mode doesn't reproduce the exact single-top-level-
+    "widerface"-folder nesting this script originally assumed -- gdown's
+    --folder layout has been observed to vary (extra nesting, a top-level
+    folder named after the Drive folder itself, or partially-failed
+    sub-downloads on a rate-limited pull) depending on machine/network.
+    Tries, in order: the originally assumed path, a directory literally
+    named `split` anywhere in the download, and the official WIDER FACE
+    zip naming (WIDER_val/WIDER_train) anywhere in the download -- accepts
+    the first candidate that at least has an images/ subdirectory (the
+    part that actually matters; a missing wider_val.txt/label.txt list
+    file only warns, since eval/training need that too but it doesn't
+    block locating the directory itself)."""
+    marker = "wider_val.txt" if split == "val" else "label.txt"
+    candidates = [extracted_root / split]
+    candidates += sorted(d for d in download_dir.rglob(split) if d.is_dir())
+    candidates += sorted(d for d in download_dir.rglob(f"WIDER_{split}") if d.is_dir())
+    for c in candidates:
+        if c.is_dir() and (c / "images").is_dir():
+            if not (c / marker).exists():
+                print(f"[dataset] warning: {c} has images/ but no {marker} -- eval/training will need that "
+                      f"list file too; check the download or the README's manual steps for it")
+            return c
+    _print_tree(download_dir)
+    raise AssertionError(
+        f"couldn't find a usable {split}/ directory (one containing an images/ subfolder) after download -- "
+        f"see the directory tree printed above and compare against what README.md's manual steps expect, "
+        f"or inspect {download_dir} yourself. A common cause is gdown's --folder mode partially failing on a "
+        f"large/rate-limited folder -- rerun with --force, or download+extract the folder manually into "
+        f"{download_dir} and rerun."
+    )
+
+
 def ensure_dataset(want_train: bool, force: bool) -> None:
     need_val = force or not _val_ready()
     need_train = want_train and (force or not _train_ready())
@@ -93,8 +138,7 @@ def ensure_dataset(want_train: bool, force: bool) -> None:
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if need_val:
-        src_val = extracted_root / "val"
-        assert src_val.is_dir(), f"expected {src_val} after download -- got unexpected layout, inspect {download_dir}"
+        src_val = _find_split_dir(extracted_root, download_dir, "val")
         dst_val = DATA_DIR / "val"
         if dst_val.exists():
             shutil.rmtree(dst_val)
@@ -102,8 +146,7 @@ def ensure_dataset(want_train: bool, force: bool) -> None:
         print(f"[dataset] val/ ready: {dst_val}")
 
     if need_train:
-        src_train = extracted_root / "train"
-        assert src_train.is_dir(), f"expected {src_train} after download -- got unexpected layout, inspect {download_dir}"
+        src_train = _find_split_dir(extracted_root, download_dir, "train")
         dst_train = DATA_DIR / "train"
         if dst_train.exists():
             shutil.rmtree(dst_train)
