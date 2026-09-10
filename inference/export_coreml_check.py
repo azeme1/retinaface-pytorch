@@ -90,6 +90,29 @@ def preprocess(img_bgr: np.ndarray, image_size: int, input_color_order: str) -> 
     return pt_input, cml_input
 
 
+def print_ap_report(aps: dict) -> None:
+    """Traditional WIDER FACE benchmark reporting: Easy/Medium/Hard/Average
+    AP as percentages (the convention used across WIDER FACE leaderboards
+    and papers), not raw 0-1 fractions."""
+    print(f"  Easy:    {aps['easy'] * 100:6.2f}%")
+    print(f"  Medium:  {aps['medium'] * 100:6.2f}%")
+    print(f"  Hard:    {aps['hard'] * 100:6.2f}%")
+    print(f"  Average: {we.mean_ap(aps) * 100:6.2f}%")
+
+
+def print_comparison_table(network: str, format_name: str, pt_aps: dict, other_aps: dict) -> None:
+    """Side-by-side PyTorch-vs-converted-format table -- the actual point
+    of this whole script: not just two separate AP reports, but how much
+    (if any) the conversion cost."""
+    print(f"\n=== {network}: PyTorch vs {format_name} ===")
+    print(f"{'':<10}{'PyTorch':>10}{format_name:>10}{'Diff':>10}")
+    for label, key in [("Easy", "easy"), ("Medium", "medium"), ("Hard", "hard")]:
+        pt_v, o_v = pt_aps[key] * 100, other_aps[key] * 100
+        print(f"{label:<10}{pt_v:>9.2f}%{o_v:>9.2f}%{o_v - pt_v:>+9.2f}%")
+    pt_avg, o_avg = we.mean_ap(pt_aps) * 100, we.mean_ap(other_aps) * 100
+    print(f"{'Average':<10}{pt_avg:>9.2f}%{o_avg:>9.2f}%{o_avg - pt_avg:>+9.2f}%")
+
+
 def write_prediction(save_folder: Path, img_name: str, boxes, scores):
     save_name = save_folder / (img_name[:-4] + ".txt")
     save_name.parent.mkdir(parents=True, exist_ok=True)
@@ -269,6 +292,8 @@ def main():
         print(f"\n=== {args.network}: CoreML ({mlpackage_source_label}) real WIDER FACE AP, n={len(sample)} images ===")
         cml_aps = we.run_widerface_evaluation(str(cml_pred_dir), GT_DIR)
         print_ap_report(cml_aps)
+
+        print_comparison_table(args.network, "CoreML", pt_aps, cml_aps)
 
         print(f"\n=== numeric parity (raw tensors, before NMS/thresholding) ===")
         for k, vals in diffs.items():

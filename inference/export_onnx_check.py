@@ -35,6 +35,8 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import tqdm
+
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -45,7 +47,6 @@ if str(_RETINA_DIR) not in sys.path:
     sys.path.append(str(_RETINA_DIR))
 
 from config import get_config  # noqa: E402
-from utils.box_utils import nms  # noqa: E402
 import widerface_eval as we  # noqa: E402
 
 sys.path.append(str(Path(__file__).resolve().parent))
@@ -53,6 +54,9 @@ from export_common import (  # noqa: E402
     RetinaStaticExportWrapper, load_plain_with_clusters, load_plain_with_clusters_from_hf,
     download_hf_artifact,
 )
+
+sys.path.append(str(_RETINA_DIR / "examples"))
+from _postprocess import postprocess, rescale_to_original  # noqa: E402
 
 DATASET_FOLDER = str(_RETINA_DIR / "data/widerface/val/images/")
 VAL_LIST = str(_RETINA_DIR / "data/widerface/val/wider_val.txt")
@@ -70,33 +74,29 @@ def preprocess(img_bgr: np.ndarray, image_size: int) -> np.ndarray:
     return np.float32(resized).transpose(2, 0, 1)[None]
 
 
-def top_detections(boxes, scores, landmarks, conf_threshold=0.5, nms_threshold=0.4, topk=50):
-    inds = scores.reshape(-1) > conf_threshold
-    boxes, scores, landmarks = boxes[inds], scores[inds], landmarks[inds]
-    order = scores.reshape(-1).argsort()[::-1][:topk]
-    boxes, scores, landmarks = boxes[order], scores[order], landmarks[order]
-    dets = np.hstack((boxes, scores.reshape(-1, 1))).astype(np.float32)
-    keep = nms(dets, nms_threshold)
-    return boxes[keep], scores[keep], landmarks[keep]
 
 
-def rescale_to_native(boxes: np.ndarray, image_size: int, native_h: int, native_w: int) -> np.ndarray:
-    """Boxes come out of RetinaStaticExportWrapper in the FIXED
-    image_size x image_size export canvas (see preprocess's stretch-resize,
-    no aspect-preserving letterbox) -- but the WIDER FACE ground truth
-    (.mat files) is in each image's own NATIVE resolution, which varies
-    per image. Writing export-canvas-space boxes straight to a prediction
-    file without this rescale compares them against ground truth in the
-    wrong coordinate system -- every box ends up with ~0 IoU regardless of
-    whether the underlying model is any good, collapsing AP to ~0 even for
-    a checkpoint that performs fine. x and y use DIFFERENT scale factors
-    on purpose -- the stretch-resize is not aspect-preserving, so a
-    uniform scale would be wrong."""
-    if boxes.shape[0] == 0:
-        return boxes
-    scale = np.array([native_w / image_size, native_h / image_size,
-                       native_w / image_size, native_h / image_size], dtype=np.float32)
-    return boxes * scale
+def print_ap_report(aps: dict) -> None:
+    """Traditional WIDER FACE benchmark reporting: Easy/Medium/Hard/Average
+    AP as percentages (the convention used across WIDER FACE leaderboards
+    and papers), not raw 0-1 fractions."""
+    print(f"  Easy:    {aps['easy'] * 100:6.2f}%")
+    print(f"  Medium:  {aps['medium'] * 100:6.2f}%")
+    print(f"  Hard:    {aps['hard'] * 100:6.2f}%")
+    print(f"  Average: {we.mean_ap(aps) * 100:6.2f}%")
+
+
+def print_comparison_table(network: str, format_name: str, pt_aps: dict, other_aps: dict) -> None:
+    """Side-by-side PyTorch-vs-converted-format table -- the actual point
+    of this whole script: not just two separate AP reports, but how much
+    (if any) the conversion cost."""
+    print(f"\n=== {network}: PyTorch vs {format_name} ===")
+    print(f"{'':<10}{'PyTorch':>10}{format_name:>10}{'Diff':>10}")
+    for label, key in [("Easy", "easy"), ("Medium", "medium"), ("Hard", "hard")]:
+        pt_v, o_v = pt_aps[key] * 100, other_aps[key] * 100
+        print(f"{label:<10}{pt_v:>9.2f}%{o_v:>9.2f}%{o_v - pt_v:>+9.2f}%")
+    pt_avg, o_avg = we.mean_ap(pt_aps) * 100, we.mean_ap(other_aps) * 100
+    print(f"{'Average':<10}{pt_avg:>9.2f}%{o_avg:>9.2f}%{o_avg - pt_avg:>+9.2f}%")
 
 
 def write_prediction(save_folder: Path, img_name: str, boxes, scores):
@@ -201,13 +201,13 @@ def main():
         pt_input = preprocess(img_bgr, args.image_size)
 
         pt_boxes, pt_scores, pt_landm = run_pytorch(pt_input)
-        d_boxes, d_scores, d_landm = top_detections(pt_boxes, pt_scores, pt_landm)
-        d_boxes = rescale_to_native(d_boxes, args.image_size, native_h, native_w)
+        d_boxes, d_scores, d_landm = postprocess(pt_boxes, pt_scores, pt_landm)
+        d_boxes, d_landm = rescale_to_original(d_boxes, d_landm, args.image_size, native_w, native_h)
         write_prediction(pt_pred_dir, name, d_boxes, d_scores)
 
         onnx_boxes, onnx_scores, onnx_landm = run_onnx(pt_input)
-        o_boxes, o_scores, o_landm = top_detections(onnx_boxes, onnx_scores, onnx_landm)
-        o_boxes = rescale_to_native(o_boxes, args.image_size, native_h, native_w)
+        o_boxes, o_scores, o_landm = postprocess(onnx_boxes, onnx_scores, onnx_landm)
+        o_boxes, o_landm = rescale_to_original(o_boxes, o_landm, args.image_size, native_w, native_h)
         write_prediction(onnx_pred_dir, name, o_boxes, o_scores)
 
         return {
@@ -218,7 +218,7 @@ def main():
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(process, name): name for name in sample}
-        for fut in as_completed(futures):
+        for fut in tqdm.tqdm(as_completed(futures), total=len(futures), desc="PyTorch vs ONNX"):
             parity = fut.result()
             if parity is None:
                 continue
@@ -234,13 +234,13 @@ def main():
 
     print(f"\n=== {args.network}: PyTorch (fixed-size wrapper) real WIDER FACE AP, n={len(sample)} images ===")
     pt_aps = we.run_widerface_evaluation(str(pt_pred_dir), GT_DIR)
-    print(f"easy={pt_aps['easy']:.4f} medium={pt_aps['medium']:.4f} hard={pt_aps['hard']:.4f} "
-          f"mean={we.mean_ap(pt_aps):.4f}")
+    print_ap_report(pt_aps)
 
     print(f"\n=== {args.network}: ONNX Runtime ({onnx_zip}) real WIDER FACE AP, n={len(sample)} images ===")
     onnx_aps = we.run_widerface_evaluation(str(onnx_pred_dir), GT_DIR)
-    print(f"easy={onnx_aps['easy']:.4f} medium={onnx_aps['medium']:.4f} hard={onnx_aps['hard']:.4f} "
-          f"mean={we.mean_ap(onnx_aps):.4f}")
+    print_ap_report(onnx_aps)
+
+    print_comparison_table(args.network, "ONNX", pt_aps, onnx_aps)
 
     print("\n=== numeric parity (raw tensors, before NMS/thresholding) ===")
     for k, vals in diffs.items():
