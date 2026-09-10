@@ -42,6 +42,7 @@ import random
 import shutil
 import sys
 import tempfile
+import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -64,7 +65,7 @@ import widerface_eval as we  # noqa: E402
 sys.path.append(str(Path(__file__).resolve().parent))
 from export_common import (  # noqa: E402
     RetinaStaticExportWrapper, load_plain_with_clusters, load_plain_with_clusters_from_hf,
-    download_hf_artifact, replace_leaky_relu, download_from_url,
+    download_hf_artifact, replace_leaky_relu, download_from_url, select_device,
 )
 
 sys.path.append(str(_RETINA_DIR / "examples"))
@@ -184,6 +185,10 @@ def main():
                                         input_color_order=args.input_color_order).eval()
     replace_leaky_relu(wrapper)
 
+    device = select_device()
+    print(f"PyTorch reference running on: {device}")
+    wrapper = wrapper.to(device)
+
     mlmodel = None
     can_run_coreml = False
     tmp_ctx = None
@@ -231,14 +236,38 @@ def main():
         for img_name in all_images:
             write_prediction(d, img_name, np.zeros((0, 4)), np.zeros((0,)))
 
+    # MPS (Apple's own GPU backend, like CoreML) has a history of thread-
+    # safety issues under concurrent inference from multiple Python threads
+    # -- same class of problem as the CoreML lock below, so guard it the
+    # same way, defensively, rather than wait to reproduce an MPS-specific
+    # hang. CUDA's concurrent-inference-from-multiple-threads path is
+    # well-established (every major Python serving framework relies on it),
+    # so it's left unlocked.
+    pytorch_lock = threading.Lock() if device.type == "mps" else None
+
     def run_pytorch(pt_input: np.ndarray):
+        x = torch.from_numpy(pt_input).to(device)
         with torch.no_grad():
-            boxes, scores, landmarks = wrapper(torch.from_numpy(pt_input))
-        return boxes.numpy(), scores.numpy(), landmarks.numpy()
+            if pytorch_lock is not None:
+                with pytorch_lock:
+                    boxes, scores, landmarks = wrapper(x)
+            else:
+                boxes, scores, landmarks = wrapper(x)
+        return boxes.cpu().numpy(), scores.cpu().numpy(), landmarks.cpu().numpy()
+
+    # coremltools' MLModel.predict() is NOT safe to call concurrently from
+    # multiple threads on the same instance -- confirmed: without this lock,
+    # a full-val run with can_run_coreml=True hangs indefinitely at 0%
+    # (deadlocks inside the native CoreML runtime, not a Python-level
+    # exception). Only this native call is serialized; image decode + the
+    # PyTorch forward pass (run_pytorch, cv2.imread, preprocess) still run
+    # concurrently across threads.
+    coreml_lock = threading.Lock()
 
     def run_coreml(cml_input: np.ndarray):
         img = PIL.Image.fromarray(cml_input, mode="RGB")
-        out = mlmodel.predict({"input": img})
+        with coreml_lock:
+            out = mlmodel.predict({"input": img})
         return out["boxes"], out["scores"], out["landmarks"]
 
     diffs = {"boxes": [], "scores": [], "landmarks": []}

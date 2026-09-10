@@ -31,6 +31,7 @@ import random
 import shutil
 import sys
 import tempfile
+import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -52,7 +53,7 @@ import widerface_eval as we  # noqa: E402
 sys.path.append(str(Path(__file__).resolve().parent))
 from export_common import (  # noqa: E402
     RetinaStaticExportWrapper, load_plain_with_clusters, load_plain_with_clusters_from_hf,
-    download_hf_artifact,
+    download_hf_artifact, select_device,
 )
 
 sys.path.append(str(_RETINA_DIR / "examples"))
@@ -153,6 +154,10 @@ def main():
 
     wrapper = RetinaStaticExportWrapper(model, cfg, image_size=(args.image_size, args.image_size)).eval()
 
+    device = select_device()
+    print(f"PyTorch reference running on: {device}")
+    wrapper = wrapper.to(device)
+
     tmp_ctx = None
     if str(onnx_zip).endswith(".zip"):
         tmp_ctx = tempfile.TemporaryDirectory()
@@ -184,10 +189,24 @@ def main():
     diffs = {"boxes": [], "scores": [], "landmarks": []}
     session_lock_free = True  # onnxruntime CPUExecutionProvider sessions are thread-safe for .run()
 
+    # MPS (Apple's own GPU backend) has a history of thread-safety issues
+    # under concurrent inference from multiple Python threads -- confirmed
+    # the analogous problem for CoreML's MLModel.predict() in
+    # export_coreml_check.py (hangs at 0% under a ThreadPoolExecutor without
+    # a lock), so guard MPS the same way defensively. CUDA's
+    # concurrent-inference-from-multiple-threads path is well-established,
+    # so it's left unlocked.
+    pytorch_lock = threading.Lock() if device.type == "mps" else None
+
     def run_pytorch(pt_input: np.ndarray):
+        x = torch.from_numpy(pt_input).to(device)
         with torch.no_grad():
-            boxes, scores, landmarks = wrapper(torch.from_numpy(pt_input))
-        return boxes.numpy(), scores.numpy(), landmarks.numpy()
+            if pytorch_lock is not None:
+                with pytorch_lock:
+                    boxes, scores, landmarks = wrapper(x)
+            else:
+                boxes, scores, landmarks = wrapper(x)
+        return boxes.cpu().numpy(), scores.cpu().numpy(), landmarks.cpu().numpy()
 
     def run_onnx(pt_input: np.ndarray):
         boxes, scores, landmarks = session.run(None, {input_name: pt_input})

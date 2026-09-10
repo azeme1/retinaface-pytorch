@@ -26,6 +26,18 @@ from models import RetinaFace  # noqa: E402
 from utils.box_utils import decode  # noqa: E402
 
 
+def select_device() -> torch.device:
+    """Best available device for eager PyTorch inference: CUDA, then Apple
+    Silicon MPS, else CPU -- used by the check scripts' "PyTorch reference"
+    side (the exported CoreML/ONNX/etc. artifact runs on its own separate
+    engine regardless of this)."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 class _SafeLeakyReLU(nn.Module):
     """Drop-in replacement for nn.LeakyReLU that avoids coremltools 9.0's
     mlprogram frontend bug converting aten::leaky_relu(_): it always infers
