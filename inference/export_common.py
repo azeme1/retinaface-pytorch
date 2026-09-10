@@ -6,6 +6,7 @@ formats trace the exact same graph and stay in sync automatically instead
 of drifting copies -- see RetinaStaticExportWrapper's docstring for why the
 graph looks the way it does.
 """
+from __future__ import annotations
 
 import os
 import shutil

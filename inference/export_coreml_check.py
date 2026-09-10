@@ -34,6 +34,8 @@ Usage:
         --checkpoint-url https://huggingface.co/azemel/retinaface-xs/resolve/main/results/mobilenetv1/pytorch/mobilenetv1_c12.zip \\
         --mlpackage-url https://huggingface.co/azemel/retinaface-xs/resolve/main/results/mobilenetv1/coreml/mobilenetv1_c12.zip
 """
+from __future__ import annotations
+
 import argparse
 import os
 import random
