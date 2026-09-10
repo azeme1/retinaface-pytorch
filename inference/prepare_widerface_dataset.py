@@ -24,14 +24,15 @@ Sources (same ones README.md documents, just automated):
       .mat files ship inside this clone -- no separate download for those)
 
 Usage:
-    python inference/prepare_widerface_dataset.py            # val only (eval/export-check workflows)
-    python inference/prepare_widerface_dataset.py --train     # also fetch train/ (needed to retrain a backbone)
-    python inference/prepare_widerface_dataset.py --force     # re-download/rebuild even if already present
+    python inference/prepare_widerface_dataset.py              # fetches both train/ and val/
+    python inference/prepare_widerface_dataset.py --val-only    # skip train/ (eval/export-check workflows only)
+    python inference/prepare_widerface_dataset.py --force       # re-download/rebuild even if already present
 """
 import argparse
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 RETINA_DIR = Path(__file__).resolve().parents[1]
@@ -108,6 +109,60 @@ def _find_split_dir(extracted_root: Path, download_dir: Path, split: str) -> Pat
     )
 
 
+def _attempt_gdown_folder_download(folder_id: str, download_dir: Path) -> bool:
+    """One gdown --folder attempt, streaming its output live. Returns
+    whether it actually produced files -- gdown's own known failure mode
+    here ("Retrieving folder contents" / "Failed to retrieve folder
+    contents", e.g. Drive rate limiting, an outdated gdown build, or a
+    folder too large to list unauthenticated) exits 0 despite failing, so
+    a non-empty download_dir is the only reliable success signal."""
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "gdown", "--folder", folder_id, "-O", str(download_dir)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+    )
+    output = []
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+        output.append(line)
+    proc.wait()
+    return proc.returncode == 0 and "Failed to retrieve folder contents" not in "".join(output) \
+        and any(download_dir.iterdir())
+
+
+def _download_gdrive_folder_with_retries(folder_id: str, download_dir: Path,
+                                          max_attempts: int = 4, backoff_seconds: float = 10.0) -> None:
+    """Fully automatic: retries the flaky gdown --folder listing itself --
+    upgrades gdown once (the failure is often gdown falling behind a
+    changed Drive page format) then keeps retrying with backoff (the
+    failure is also often just transient Drive rate limiting), no
+    intervention needed unless every attempt genuinely exhausts itself."""
+    upgraded = False
+    for attempt in range(1, max_attempts + 1):
+        print(f"[dataset] gdown attempt {attempt}/{max_attempts}...")
+        if _attempt_gdown_folder_download(folder_id, download_dir):
+            return
+        for f in download_dir.iterdir():
+            shutil.rmtree(f) if f.is_dir() else f.unlink()  # clear a partial/empty attempt before retrying
+        if not upgraded:
+            print("[dataset] gdown failed to list the folder -- upgrading gdown and retrying "
+                  "(this failure mode is usually gdown falling behind a Drive page-format change)")
+            _run([sys.executable, "-m", "pip", "install", "-U", "gdown"])
+            upgraded = True
+        elif attempt < max_attempts:
+            print(f"[dataset] still failing -- Drive rate limiting is often transient, "
+                  f"waiting {backoff_seconds:.0f}s before retrying...")
+            time.sleep(backoff_seconds)
+
+    raise RuntimeError(
+        f"gdown could not retrieve the Google Drive folder after {max_attempts} automatic attempts "
+        f"(including a gdown upgrade) -- see its output above. This particular folder/network combination "
+        f"may need a manual download: open "
+        f"https://drive.google.com/drive/folders/{folder_id} in a browser, download it, extract it into "
+        f"{download_dir}, and rerun this script (it accepts several sub-layouts once files are actually "
+        f"there -- see _find_split_dir)."
+    )
+
+
 def ensure_dataset(want_train: bool, force: bool) -> None:
     need_val = force or not _val_ready()
     need_train = want_train and (force or not _train_ready())
@@ -125,7 +180,7 @@ def ensure_dataset(want_train: bool, force: bool) -> None:
     download_dir.mkdir(exist_ok=True)
     print(f"[dataset] downloading pre-organized WIDER FACE dataset (Google Drive folder "
           f"{DATASET_GDRIVE_FOLDER_ID}) -- this can take a while (train+val images)")
-    _run([sys.executable, "-m", "gdown", "--folder", DATASET_GDRIVE_FOLDER_ID, "-O", str(download_dir)])
+    _download_gdrive_folder_with_retries(DATASET_GDRIVE_FOLDER_ID, download_dir)
 
     # The folder's own internal layout is expected to already match
     # data/widerface/{train,val}/... (that's the whole point of the
@@ -177,13 +232,16 @@ def ensure_eval_tool(force: bool) -> None:
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--train", action="store_true", help="also fetch data/widerface/train/ (needed to retrain a "
-                                                          "backbone from scratch; not needed for eval/export-check)")
+    p.add_argument("--val-only", action="store_true",
+                    help="skip data/widerface/train/ -- by default both splits are fetched, since gdown "
+                         "downloads the whole shared folder (train+val together) in one shot regardless, so "
+                         "skipping train afterward only discards already-downloaded data, not bandwidth/time")
     p.add_argument("--force", action="store_true", help="re-download/rebuild even if already present")
     p.add_argument("--skip-eval-tool", action="store_true", help="skip cloning/building widerface_evaluation")
     args = p.parse_args()
+    want_train = not args.val_only
 
-    ensure_dataset(want_train=args.train, force=args.force)
+    ensure_dataset(want_train=want_train, force=args.force)
     if not args.skip_eval_tool:
         ensure_eval_tool(force=args.force)
 
@@ -191,7 +249,7 @@ def main():
     n_val_list = len((DATA_DIR / "val" / "wider_val.txt").read_text().split()) if _val_ready() else 0
     print(f"\n[done] val/: {n_val_images} images on disk, {n_val_list} entries in wider_val.txt "
           f"(expect 3226 images, 3226 entries)")
-    if args.train:
+    if want_train:
         n_train_images = sum(1 for _ in (DATA_DIR / "train" / "images").rglob("*.jpg")) if _train_ready() else 0
         print(f"[done] train/: {n_train_images} images on disk (expect 12880)")
     print(f"[done] eval tool: {'ready' if _eval_tool_ready() else 'NOT ready -- see errors above'}")
