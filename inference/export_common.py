@@ -142,7 +142,22 @@ class RetinaStaticExportWrapper(nn.Module):
         landmark_scale = torch.tensor([width, height] * 5, dtype=torch.float32)
         self.register_buffer("landmark_scale", landmark_scale)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, output_size: tuple[int, int] | None = None):
+        """output_size: (width, height) to rescale boxes/landmarks to,
+        e.g. an original image's own native resolution -- OFF (None) by
+        default, which is what every actual export traces with, so this
+        adds no op to the exported ONNX/CoreML/etc. graph (those always
+        return export-canvas-space coordinates; an exported graph can't
+        know an arbitrary caller's native size at conversion time anyway).
+        This is purely an eager-PyTorch convenience for callers that DO
+        know their own target size up front (e.g. a check/comparison
+        script running the un-exported wrapper directly against images of
+        varying native resolution) -- pass it and get ready-to-use,
+        already-scaled boxes back instead of manually rescaling
+        export-canvas coordinates afterward (see examples/_postprocess.py's
+        rescale_to_original for the equivalent standalone helper every
+        exported-format consumer still needs, since THEY have no such
+        option)."""
         # x: [1, 3, H, W], raw float pixel values (0-255) in
         # self.input_color_order channel order -- normalized here so the
         # exported model is fully self-contained (raw image in), same
@@ -160,8 +175,19 @@ class RetinaStaticExportWrapper(nn.Module):
         loc, conf, landmarks = loc[0], conf[0], landmarks[0]
 
         priors = self.priors.float()  # upcast needed when priors_dtype is float16 (CoreML export)
-        boxes = decode(loc, priors, self.variance) * self.bbox_scale
-        landmarks = _decode_landmarks_2d(landmarks, priors, self.variance) * self.landmark_scale
+        bbox_scale, landmark_scale = self.bbox_scale, self.landmark_scale
+        if output_size is not None:
+            # self.bbox_scale is [canvas_w, canvas_h, canvas_w, canvas_h] --
+            # rescaling relative to it (rather than re-deriving canvas size
+            # separately) keeps this exact to whatever forward() already
+            # decodes with, no risk of drifting out of sync with it.
+            out_w, out_h = output_size
+            canvas_w, canvas_h = float(bbox_scale[0]), float(bbox_scale[1])
+            bbox_scale = bbox_scale * torch.tensor(
+                [out_w / canvas_w, out_h / canvas_h, out_w / canvas_w, out_h / canvas_h])
+            landmark_scale = landmark_scale * torch.tensor([out_w / canvas_w, out_h / canvas_h] * 5)
+        boxes = decode(loc, priors, self.variance) * bbox_scale
+        landmarks = _decode_landmarks_2d(landmarks, priors, self.variance) * landmark_scale
 
         scores = conf[:, 1:2]  # face-class confidence, kept 2D: [num_priors, 1]
         return boxes, scores, landmarks

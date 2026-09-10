@@ -59,7 +59,6 @@ if str(_RETINA_DIR) not in sys.path:
     sys.path.append(str(_RETINA_DIR))
 
 from config import get_config  # noqa: E402
-from utils.box_utils import nms  # noqa: E402
 import widerface_eval as we  # noqa: E402
 
 sys.path.append(str(Path(__file__).resolve().parent))
@@ -67,6 +66,9 @@ from export_common import (  # noqa: E402
     RetinaStaticExportWrapper, load_plain_with_clusters, load_plain_with_clusters_from_hf,
     download_hf_artifact, replace_leaky_relu, download_from_url,
 )
+
+sys.path.append(str(_RETINA_DIR / "examples"))
+from _postprocess import postprocess, rescale_to_original  # noqa: E402
 
 DATASET_FOLDER = str(_RETINA_DIR / "data/widerface/val/images/")
 VAL_LIST = str(_RETINA_DIR / "data/widerface/val/wider_val.txt")
@@ -86,16 +88,6 @@ def preprocess(img_bgr: np.ndarray, image_size: int, input_color_order: str) -> 
     pt_input = np.float32(ordered).transpose(2, 0, 1)[None]  # 1,3,H,W
     cml_input = resized_rgb.astype(np.uint8)  # H,W,3 -- CoreML's own ImageType input
     return pt_input, cml_input
-
-
-def top_detections(boxes, scores, landmarks, conf_threshold=0.5, nms_threshold=0.4, topk=50):
-    inds = scores.reshape(-1) > conf_threshold
-    boxes, scores, landmarks = boxes[inds], scores[inds], landmarks[inds]
-    order = scores.reshape(-1).argsort()[::-1][:topk]
-    boxes, scores, landmarks = boxes[order], scores[order], landmarks[order]
-    dets = np.hstack((boxes, scores.reshape(-1, 1))).astype(np.float32)
-    keep = nms(dets, nms_threshold)
-    return boxes[keep], scores[keep], landmarks[keep]
 
 
 def write_prediction(save_folder: Path, img_name: str, boxes, scores):
@@ -232,16 +224,19 @@ def main():
         img_bgr = cv2.imread(str(Path(DATASET_FOLDER) / name), cv2.IMREAD_COLOR)
         if img_bgr is None:
             return None
+        native_h, native_w = img_bgr.shape[:2]
         pt_input, cml_input = preprocess(img_bgr, args.image_size, args.input_color_order)
 
         pt_boxes, pt_scores, pt_landm = run_pytorch(pt_input)
-        d_boxes, d_scores, d_landm = top_detections(pt_boxes, pt_scores, pt_landm)
+        d_boxes, d_scores, d_landm = postprocess(pt_boxes, pt_scores, pt_landm)
+        d_boxes, d_landm = rescale_to_original(d_boxes, d_landm, args.image_size, native_w, native_h)
         write_prediction(pt_pred_dir, name, d_boxes, d_scores)
 
         parity = None
         if can_run_coreml:
             cml_boxes, cml_scores, cml_landm = run_coreml(cml_input)
-            c_boxes, c_scores, c_landm = top_detections(cml_boxes, cml_scores, cml_landm)
+            c_boxes, c_scores, c_landm = postprocess(cml_boxes, cml_scores, cml_landm)
+            c_boxes, c_landm = rescale_to_original(c_boxes, c_landm, args.image_size, native_w, native_h)
             write_prediction(cml_pred_dir, name, c_boxes, c_scores)
             parity = {
                 "boxes": float(np.abs(pt_boxes - cml_boxes).max()),
@@ -268,14 +263,12 @@ def main():
 
     print(f"\n=== {args.network}: PyTorch (fixed-size wrapper) real WIDER FACE AP, n={len(sample)} images ===")
     pt_aps = we.run_widerface_evaluation(str(pt_pred_dir), GT_DIR)
-    print(f"easy={pt_aps['easy']:.4f} medium={pt_aps['medium']:.4f} hard={pt_aps['hard']:.4f} "
-          f"mean={we.mean_ap(pt_aps):.4f}")
+    print_ap_report(pt_aps)
 
     if can_run_coreml:
         print(f"\n=== {args.network}: CoreML ({mlpackage_source_label}) real WIDER FACE AP, n={len(sample)} images ===")
         cml_aps = we.run_widerface_evaluation(str(cml_pred_dir), GT_DIR)
-        print(f"easy={cml_aps['easy']:.4f} medium={cml_aps['medium']:.4f} hard={cml_aps['hard']:.4f} "
-              f"mean={we.mean_ap(cml_aps):.4f}")
+        print_ap_report(cml_aps)
 
         print(f"\n=== numeric parity (raw tensors, before NMS/thresholding) ===")
         for k, vals in diffs.items():
