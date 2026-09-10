@@ -44,6 +44,8 @@ import sys
 import tempfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import tqdm
 from pathlib import Path
 
 import coremltools as ct
@@ -250,7 +252,7 @@ def main():
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(process, name): name for name in sample}
-        for fut in as_completed(futures):
+        for fut in tqdm.tqdm(as_completed(futures), total=len(futures), desc="PyTorch vs CoreML"):
             parity = fut.result()
             if parity is None:
                 continue
