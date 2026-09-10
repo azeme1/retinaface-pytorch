@@ -66,10 +66,8 @@ sys.path.append(str(Path(__file__).resolve().parent))
 from export_common import (  # noqa: E402
     RetinaStaticExportWrapper, load_plain_with_clusters, load_plain_with_clusters_from_hf,
     download_hf_artifact, replace_leaky_relu, download_from_url, select_device,
+    postprocess, rescale_to_original,
 )
-
-sys.path.append(str(_RETINA_DIR / "examples"))
-from _postprocess import postprocess, rescale_to_original  # noqa: E402
 
 DATASET_FOLDER = str(_RETINA_DIR / "data/widerface/val/images/")
 VAL_LIST = str(_RETINA_DIR / "data/widerface/val/wider_val.txt")

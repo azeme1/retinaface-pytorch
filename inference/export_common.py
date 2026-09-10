@@ -16,6 +16,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
@@ -320,3 +321,64 @@ def download_from_url(url: str, token: str | None = None) -> Path:
         shutil.copyfileobj(resp, out)
     print(f"downloaded -> {tmp_path} ({tmp_path.stat().st_size / 1e6:.2f} MB)")
     return tmp_path
+
+
+def nms(dets, thresh: float) -> list[int]:
+    x1, y1, x2, y2, scores = dets[:, 0], dets[:, 1], dets[:, 2], dets[:, 3], dets[:, 4]
+    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
+    order = scores.argsort()[::-1]
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(int(i))
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+        w = np.maximum(0.0, xx2 - xx1 + 1)
+        h = np.maximum(0.0, yy2 - yy1 + 1)
+        inter = w * h
+        overlap = inter / (areas[i] + areas[order[1:]] - inter)
+        order = order[np.where(overlap <= thresh)[0] + 1]
+    return keep
+
+
+def postprocess(boxes, scores, landmarks, conf_threshold: float = 0.5, nms_threshold: float = 0.4, top_k: int = 750):
+    """boxes: [N,4], scores: [N,1] or [N], landmarks: [N,10] -- raw decoded
+    output straight from any of this repo's exported models (or the
+    RetinaStaticExportWrapper directly). Returns (boxes, scores, landmarks)
+    for the detections that survive thresholding + NMS, highest score
+    first. Same implementation as examples/_postprocess.py's own
+    postprocess() -- duplicated here (not imported from there) so the
+    inference/ scripts in this directory don't reach into a sibling
+    directory for something this basic; examples/ stays self-contained
+    for its own, separate audience (someone who only downloaded that one
+    folder from the Hub)."""
+    scores = scores.reshape(-1)
+    keep = scores > conf_threshold
+    boxes, scores, landmarks = boxes[keep], scores[keep], landmarks[keep]
+
+    order = scores.argsort()[::-1]
+    boxes, scores, landmarks = boxes[order], scores[order], landmarks[order]
+
+    dets = np.hstack([boxes, scores[:, None]]).astype(np.float32, copy=False)
+    keep_idx = nms(dets, nms_threshold)[:top_k]
+    return boxes[keep_idx], scores[keep_idx], landmarks[keep_idx]
+
+
+def rescale_to_original(boxes, landmarks, image_size: int, native_w: int, native_h: int):
+    """Rescales boxes/landmarks from the fixed image_size x image_size
+    export canvas (see RetinaStaticExportWrapper) back to one image's own
+    native resolution. x and y use INDEPENDENT scale factors on purpose --
+    the export's own preprocessing is a stretch-resize, not
+    aspect-preserving, so a single uniform scale would be wrong."""
+    if boxes.shape[0] == 0:
+        return boxes, landmarks
+    sx, sy = native_w / image_size, native_h / image_size
+    boxes = boxes.copy()
+    boxes[:, [0, 2]] *= sx
+    boxes[:, [1, 3]] *= sy
+    landmarks = landmarks.copy()
+    landmarks[:, 0::2] *= sx
+    landmarks[:, 1::2] *= sy
+    return boxes, landmarks
