@@ -7,9 +7,11 @@ of drifting copies -- see RetinaStaticExportWrapper's docstring for why the
 graph looks the way it does.
 """
 
-import json
 import os
+import shutil
 import sys
+import tempfile
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -17,15 +19,6 @@ import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
 
-_RETINA_DIR = Path(__file__).resolve().parents[1]
-_REPO_ROOT = Path("/workspace/home_0/work/llwll")
-
-# This module is the INFERENCE side of the export pipeline and must have NO
-# dependency on this project's private training/QAT package -- that package
-# isn't even part of this repo. Every function here only ever sees a plain
-# RetinaFace + a {table, indices} dict, never a raw training checkpoint.
-if str(_RETINA_DIR) not in sys.path:
-    sys.path.append(str(_RETINA_DIR))
 
 from layers import PriorBox  # noqa: E402
 from models import RetinaFace  # noqa: E402
@@ -240,18 +233,9 @@ def load_plain_with_clusters(cfg: dict, plain_checkpoint: str, clusters_path: st
 
 
 def _hf_token(explicit: str | None = None) -> str | None:
-    """Resolves a Hugging Face token: --hf-token if given, else the same
-    .env_json this whole session's HF pushes have used, else HF_TOKEN env
-    var, else None (fine for a public repo)."""
-    if explicit:
-        return explicit
-    env_json = _REPO_ROOT / ".env_json"
-    if env_json.exists():
-        try:
-            return json.loads(env_json.read_text()).get("HF_TOKEN")
-        except Exception:
-            pass
-    return os.environ.get("HF_TOKEN")
+    """Resolves a Hugging Face token: --hf-token if given, else the
+    HF_TOKEN system variable, else None (fine for a public repo)."""
+    return explicit or os.environ.get("HF_TOKEN")
 
 
 def download_hf_artifact(repo_id: str, network: str, fmt: str, level: str, token: str | None = None) -> Path:
@@ -275,3 +259,25 @@ def load_plain_with_clusters_from_hf(cfg: dict, repo_id: str, network: str, leve
     load_plain_with_clusters_from_zip."""
     zip_path = download_hf_artifact(repo_id, network, "pytorch", level, token=token)
     return load_plain_with_clusters_from_zip(cfg, str(zip_path))
+
+
+def download_from_url(url: str, token: str | None = None) -> Path:
+    """Downloads any artifact (a plain+clusters checkpoint zip/.pth, or a
+    zipped .mlpackage) straight from a URL to a local temp file, preserving
+    the URL's own suffix so callers' own `.endswith(".zip")` dispatch still
+    works -- e.g. a direct link into a Hugging Face repo's resolve/main/...
+    path (export_pytorch_batch_hf.py's/export_coreml.py's own naming
+    convention), but works for any plain HTTP(S) URL. Sends the given (or
+    HF_TOKEN system variable) token as a bearer token if set -- needed for
+    a private HF repo (a plain unauthenticated GET against one 401s),
+    harmless against a public URL that ignores it."""
+    suffix = Path(url.split("?")[0]).suffix or ".zip"
+    tmp_path = Path(tempfile.mkstemp(suffix=suffix)[1])
+    print(f"downloading {url} ...")
+    token = _hf_token(token)
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req) as resp, open(tmp_path, "wb") as out:
+        shutil.copyfileobj(resp, out)
+    print(f"downloaded -> {tmp_path} ({tmp_path.stat().st_size / 1e6:.2f} MB)")
+    return tmp_path

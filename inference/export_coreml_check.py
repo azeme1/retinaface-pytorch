@@ -27,8 +27,15 @@ Usage:
     # this is the form to run on a Mac, where .predict() actually works:
     python inference/export_coreml_check.py --network resnet18 \\
         --hf-repo azemel/retinaface-xs --hf-level c2 --image-size 640 --n-images 60
+
+    # or download either artifact from an arbitrary URL directly (e.g. a
+    # private repo's own resolve/main/... link, needs --hf-token or $HF_TOKEN):
+    python inference/export_coreml_check.py --network mobilenetv1 --image-size 640 \\
+        --checkpoint-url https://huggingface.co/azemel/retinaface-xs/resolve/main/results/mobilenetv1/pytorch/mobilenetv1_c12.zip \\
+        --mlpackage-url https://huggingface.co/azemel/retinaface-xs/resolve/main/results/mobilenetv1/coreml/mobilenetv1_c12.zip
 """
 import argparse
+import os
 import random
 import shutil
 import sys
@@ -54,7 +61,7 @@ import widerface_eval as we  # noqa: E402
 sys.path.append(str(Path(__file__).resolve().parent))
 from export_common import (  # noqa: E402
     RetinaStaticExportWrapper, load_plain_with_clusters, load_plain_with_clusters_from_hf,
-    download_hf_artifact, replace_leaky_relu,
+    download_hf_artifact, replace_leaky_relu, download_from_url,
 )
 
 DATASET_FOLDER = str(_RETINA_DIR / "data/widerface/val/images/")
@@ -104,16 +111,23 @@ def main():
     p.add_argument("--network", required=True)
     p.add_argument("--checkpoint", default=None, help="local export_pytorch.py output -- combined .zip or "
                                                         "bare .pth (see export_coreml.py's own --checkpoint) -- "
-                                                        "mutually exclusive with --hf-repo")
+                                                        "mutually exclusive with --checkpoint-url/--hf-repo")
+    p.add_argument("--checkpoint-url", default=None, help="download --checkpoint from this URL instead of a "
+                                                            "local file, e.g. a direct link into a Hugging Face "
+                                                            "repo's resolve/main/... path")
     p.add_argument("--mlpackage", default=None, help="local export_coreml.py output (.zip or raw "
-                                                       ".mlpackage) -- mutually exclusive with --hf-repo")
+                                                       ".mlpackage) -- mutually exclusive with --mlpackage-url/--hf-repo")
+    p.add_argument("--mlpackage-url", default=None, help="download --mlpackage from this URL instead of a "
+                                                           "local file")
     p.add_argument("--hf-repo", default=None, help="Hugging Face repo id (e.g. azemel/retinaface-xs) to "
                                                      "pull BOTH the pytorch source and the coreml artifact "
                                                      "from instead of local files -- requires --hf-level")
     p.add_argument("--hf-level", default=None, help="e.g. 'c7' or 'float32' (see "
                                                       "export_pytorch_batch_hf.py's tag convention) -- "
                                                       "selects results/<network>/{pytorch,coreml}/<network>_<level>.zip")
-    p.add_argument("--hf-token", default=None, help="defaults to .env_json's HF_TOKEN, then $HF_TOKEN")
+    p.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"),
+                    help="bearer token for a private repo -- defaults to the HF_TOKEN system variable, used for "
+                         "--hf-repo as well as --checkpoint-url/--mlpackage-url")
     p.add_argument("--input-color-order", default="bgr", choices=["bgr", "rgb"],
                     help="must match what export_coreml.py used to build this .mlpackage")
     p.add_argument("--image-size", type=int, default=640)
@@ -122,21 +136,26 @@ def main():
 
     cfg = dict(get_config(args.network))
 
+    def _resolve(local: str | None, url: str | None, label: str) -> str | None:
+        assert not (local and url), f"--{label} and --{label}-url are mutually exclusive"
+        return str(download_from_url(url, token=args.hf_token)) if url else local
+
     if args.hf_repo:
         assert args.hf_level, "--hf-repo needs --hf-level"
-        assert not args.checkpoint and not args.mlpackage, (
-            "--hf-repo is mutually exclusive with --checkpoint/--mlpackage"
+        assert not args.checkpoint and not args.checkpoint_url and not args.mlpackage and not args.mlpackage_url, (
+            "--hf-repo is mutually exclusive with --checkpoint/--checkpoint-url/--mlpackage/--mlpackage-url"
         )
         model, _ = load_plain_with_clusters_from_hf(cfg, args.hf_repo, args.network, args.hf_level,
                                                      token=args.hf_token)
         mlpackage_arg = str(download_hf_artifact(args.hf_repo, args.network, "coreml", args.hf_level,
                                                   token=args.hf_token))
     else:
-        assert args.checkpoint and args.mlpackage, (
-            "need --checkpoint + --mlpackage (or --hf-repo + --hf-level instead)"
+        checkpoint_arg = _resolve(args.checkpoint, args.checkpoint_url, "checkpoint")
+        mlpackage_arg = _resolve(args.mlpackage, args.mlpackage_url, "mlpackage")
+        assert checkpoint_arg and mlpackage_arg, (
+            "need --checkpoint/--checkpoint-url + --mlpackage/--mlpackage-url (or --hf-repo + --hf-level instead)"
         )
-        model, _ = load_plain_with_clusters(cfg, args.checkpoint)
-        mlpackage_arg = args.mlpackage
+        model, _ = load_plain_with_clusters(cfg, checkpoint_arg)
 
     wrapper = RetinaStaticExportWrapper(model, cfg, image_size=(args.image_size, args.image_size),
                                         priors_dtype=torch.float16,
