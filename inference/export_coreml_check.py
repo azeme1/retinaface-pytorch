@@ -133,7 +133,10 @@ def main():
     p.add_argument("--input-color-order", default="bgr", choices=["bgr", "rgb"],
                     help="must match what export_coreml.py used to build this .mlpackage")
     p.add_argument("--image-size", type=int, default=640)
-    p.add_argument("--n-images", type=int, default=60, help="WIDER FACE val images to sample")
+    p.add_argument("--n-images", type=int, default=None,
+                    help="WIDER FACE val images to sample -- default is the FULL val set (3226 images), the "
+                         "only way to get an AP comparable across runs; pass a smaller number for a quick, "
+                         "noisier spot check instead")
     args = p.parse_args()
 
     cfg = dict(get_config(args.network))
@@ -194,7 +197,7 @@ def main():
 
     with open(VAL_LIST) as f:
         all_images = [n.lstrip("/") for n in f.read().split()]
-    sample = random.Random(0).sample(all_images, args.n_images)
+    sample = all_images if args.n_images is None else random.Random(0).sample(all_images, args.n_images)
 
     pt_pred_dir = _RETINA_DIR / "results" / args.network / "coreml_check_pred_pytorch"
     cml_pred_dir = _RETINA_DIR / "results" / args.network / "coreml_check_pred_coreml"
@@ -254,11 +257,12 @@ def main():
             for k in diffs:
                 diffs[k].append(parity[k])
 
-    print(f"\nNote: only {len(sample)}/{len(all_images)} val images were actually run -- every other image "
-          f"counts as 0 recall (same downward bias as this repo's own training-time quick-probe), so the "
-          f"absolute AP below is NOT comparable to results/<network>/full_eval_parallel/*.json. The bias is "
-          f"identical on both the PyTorch and CoreML sides, sampled from the same fixed seed, so the "
-          f"PyTorch-vs-CoreML COMPARISON is still meaningful -- raise --n-images for a tighter one.")
+    if len(sample) < len(all_images):
+        print(f"\nNote: only {len(sample)}/{len(all_images)} val images were actually run -- every other image "
+              f"counts as 0 recall (same downward bias as this repo's own training-time quick-probe), so the "
+              f"absolute AP below is NOT comparable to results/<network>/full_eval_parallel/*.json. The bias is "
+              f"identical on both the PyTorch and CoreML sides, sampled from the same fixed seed, so the "
+              f"PyTorch-vs-CoreML COMPARISON is still meaningful -- omit --n-images for the full val set instead.")
 
     print(f"\n=== {args.network}: PyTorch (fixed-size wrapper) real WIDER FACE AP, n={len(sample)} images ===")
     pt_aps = we.run_widerface_evaluation(str(pt_pred_dir), GT_DIR)
