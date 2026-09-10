@@ -5,21 +5,47 @@ fully manual, README-only process (see README.md's "Download the WIDERFACE
 Dataset" / "Evaluating RetinaFace on WiderFace Dataset" sections) with no
 existing script to reuse; this is that script.
 
+Downloads from the CUHK-CSE/wider_face Hugging Face dataset repo -- a
+re-host of the official http://shuoyang1213.me/WIDERFACE/ distribution
+(WIDER_train.zip, WIDER_val.zip, wider_face_split.zip) on HF's own CDN via
+plain huggingface_hub file downloads (resumable, no folder-listing step to
+break). This replaced an earlier gdown-against-a-shared-Google-Drive-folder
+approach that proved unreliable in practice (Drive's folder-listing API
+rate-limits or breaks outright depending on gdown version/network -- see
+git history for the retry/upgrade logic that was needed to work around it,
+now unnecessary).
+
+IMPORTANT caveat this rewrite introduces: CUHK-CSE/wider_face re-hosts the
+OFFICIAL WIDER FACE distribution -- images + bounding boxes only. It does
+NOT include the 5-point facial landmark annotations RetinaFace's own
+label.txt format was designed around for training (those are a separate
+contribution, biubug6's retinaface_gt_v1.1 bundle, not re-hosted on HF).
+train/label.txt is generated here from the official bounding-box-only
+wider_face_train_bbx_gt.txt with every face's landmarks marked invalid
+(-1) -- utils/dataset.py's WiderFaceDetection loader already handles a
+per-face invalid-landmark marker (see its __getitem__: `1 if label[4] >= 0
+else -1`), so training RUNS on this data, but with zero landmark
+supervision throughout the whole run -- NOT equivalent to a checkpoint
+trained on the original biubug6 annotations. Fine for eval/export-check
+(which never touches landmark ground truth here -- WIDER FACE's own AP
+scoring is box-only) or a bbox-only ablation; NOT fine for reproducing a
+real landmark-capable checkpoint from scratch.
+
 Idempotent: every step checks whether its target already exists (this
 machine already has both set up) before downloading/building anything, so
 re-running is always safe and near-instant once everything's in place.
 
 Produces:
     data/widerface/
-        train/images/<event>/<file>.jpg, train/label.txt   (only with --train)
+        train/images/<event>/<file>.jpg, train/label.txt   (only with both splits, see --val-only)
         val/images/<event>/<file>.jpg, val/wider_val.txt
     widerface_evaluation/
         ground_truth/wider_{easy,medium,hard}_val.mat, wider_face_val.mat
         bbox.cpython-*.so   (compiled from box_overlaps.pyx)
 
-Sources (same ones README.md documents, just automated):
-    - Dataset (pre-organized train+val, credited to biubug6 in README.md):
-      Google Drive folder id 11UGV3nbVv1x9IC--_tK3Uxf7hA6rlbsS
+Sources:
+    - Dataset: https://huggingface.co/datasets/CUHK-CSE/wider_face (re-host
+      of the official http://shuoyang1213.me/WIDERFACE/ distribution)
     - Eval tool: https://github.com/yakhyo/widerface_evaluation (ground_truth
       .mat files ship inside this clone -- no separate download for those)
 
@@ -29,17 +55,19 @@ Usage:
     python inference/prepare_widerface_dataset.py --force       # re-download/rebuild even if already present
 """
 import argparse
-import shutil
+import os
 import subprocess
 import sys
-import time
+import zipfile
 from pathlib import Path
+
+from huggingface_hub import hf_hub_download
 
 RETINA_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = RETINA_DIR / "data" / "widerface"
 EVAL_DIR = RETINA_DIR / "widerface_evaluation"
 
-DATASET_GDRIVE_FOLDER_ID = "11UGV3nbVv1x9IC--_tK3Uxf7hA6rlbsS"
+DATASET_REPO_ID = "CUHK-CSE/wider_face"
 EVAL_TOOL_REPO = "https://github.com/yakhyo/widerface_evaluation"
 
 
@@ -64,103 +92,92 @@ def _eval_tool_ready() -> bool:
     return has_mats and has_compiled_bbox
 
 
-def _print_tree(root: Path, max_entries: int = 300) -> None:
-    print(f"[dataset] directory tree under {root}:")
-    count = 0
-    for p in sorted(root.rglob("*")):
-        print(f"  {p.relative_to(root)}{'/' if p.is_dir() else ''}")
-        count += 1
-        if count >= max_entries:
-            print(f"  ... (truncated after {max_entries} entries)")
-            break
+def _hf_dataset_file(filename: str) -> Path:
+    """Downloads one file from CUHK-CSE/wider_face via huggingface_hub's
+    own cache (a second call for the same file is instant, no re-download).
+    HF_TOKEN is optional -- this dataset is public -- but honored if set,
+    to avoid anonymous rate limits on a slow/shared connection."""
+    return Path(hf_hub_download(repo_id=DATASET_REPO_ID, repo_type="dataset", filename=filename,
+                                 token=os.environ.get("HF_TOKEN")))
 
 
-def _find_split_dir(extracted_root: Path, download_dir: Path, split: str) -> Path:
-    """Locates the downloaded split's directory (val or train) even when
-    gdown's --folder mode doesn't reproduce the exact single-top-level-
-    "widerface"-folder nesting this script originally assumed -- gdown's
-    --folder layout has been observed to vary (extra nesting, a top-level
-    folder named after the Drive folder itself, or partially-failed
-    sub-downloads on a rate-limited pull) depending on machine/network.
-    Tries, in order: the originally assumed path, a directory literally
-    named `split` anywhere in the download, and the official WIDER FACE
-    zip naming (WIDER_val/WIDER_train) anywhere in the download -- accepts
-    the first candidate that at least has an images/ subdirectory (the
-    part that actually matters; a missing wider_val.txt/label.txt list
-    file only warns, since eval/training need that too but it doesn't
-    block locating the directory itself)."""
-    marker = "wider_val.txt" if split == "val" else "label.txt"
-    candidates = [extracted_root / split]
-    candidates += sorted(d for d in download_dir.rglob(split) if d.is_dir())
-    candidates += sorted(d for d in download_dir.rglob(f"WIDER_{split}") if d.is_dir())
-    for c in candidates:
-        if c.is_dir() and (c / "images").is_dir():
-            if not (c / marker).exists():
-                print(f"[dataset] warning: {c} has images/ but no {marker} -- eval/training will need that "
-                      f"list file too; check the download or the README's manual steps for it")
-            return c
-    _print_tree(download_dir)
-    raise AssertionError(
-        f"couldn't find a usable {split}/ directory (one containing an images/ subfolder) after download -- "
-        f"see the directory tree printed above and compare against what README.md's manual steps expect, "
-        f"or inspect {download_dir} yourself. A common cause is gdown's --folder mode partially failing on a "
-        f"large/rate-limited folder -- rerun with --force, or download+extract the folder manually into "
-        f"{download_dir} and rerun."
-    )
+def _extract_split_images(zip_path: Path, wider_folder_name: str, dst_split_dir: Path) -> None:
+    """Extracts only the `<wider_folder_name>/images/...` member tree from
+    an official WIDER_{train,val}.zip (confirmed via direct inspection:
+    that's the exact top-level layout CUHK-CSE/wider_face's zips use)
+    straight into dst_split_dir/images -- no intermediate extract-then-move
+    step needed since the expected internal layout is already known."""
+    prefix = f"{wider_folder_name}/images/"
+    with zipfile.ZipFile(zip_path) as zf:
+        members = [m for m in zf.namelist() if m.startswith(prefix) and not m.endswith("/")]
+        assert members, f"{zip_path} has no members under {prefix} -- unexpected zip layout"
+        for member in members:
+            rel = member[len(prefix):]
+            target = dst_split_dir / "images" / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member) as src, open(target, "wb") as dst:
+                dst.write(src.read())
 
 
-def _attempt_gdown_folder_download(folder_id: str, download_dir: Path) -> bool:
-    """One gdown --folder attempt, streaming its output live. Returns
-    whether it actually produced files -- gdown's own known failure mode
-    here ("Retrieving folder contents" / "Failed to retrieve folder
-    contents", e.g. Drive rate limiting, an outdated gdown build, or a
-    folder too large to list unauthenticated) exits 0 despite failing, so
-    a non-empty download_dir is the only reliable success signal."""
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "gdown", "--folder", folder_id, "-O", str(download_dir)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-    )
-    output = []
-    for line in proc.stdout:
-        print(line, end="", flush=True)
-        output.append(line)
-    proc.wait()
-    return proc.returncode == 0 and "Failed to retrieve folder contents" not in "".join(output) \
-        and any(download_dir.iterdir())
+def _parse_bbx_gt(text: str) -> list[tuple[str, list[list[float]]]]:
+    """Parses the official wider_face_{train,val}_bbx_gt.txt format:
+    filename line, face-count line, then that many
+    'x1 y1 w h blur expression illumination invalid occlusion pose' lines
+    -- except when count is 0, where the file still has exactly ONE dummy
+    line afterward regardless (confirmed by direct inspection: 4 such
+    cases in the real train file, 0 in val) -- a well-known WIDER FACE
+    annotation-file quirk. Returns [(relative_image_path, [[x1,y1,w,h], ...]), ...],
+    skipping the dummy line's contents for count==0 entries."""
+    lines = [ln for ln in text.splitlines() if ln.strip() != ""]
+    i = 0
+    entries = []
+    while i < len(lines):
+        fname = lines[i].strip()
+        i += 1
+        count = int(lines[i].strip())
+        i += 1
+        n_lines_to_consume = count if count > 0 else 1
+        boxes = []
+        for _ in range(n_lines_to_consume):
+            parts = lines[i].split()
+            i += 1
+            if count > 0:
+                boxes.append([float(x) for x in parts[:4]])  # x1, y1, w, h
+        entries.append((fname, boxes))
+    return entries
 
 
-def _download_gdrive_folder_with_retries(folder_id: str, download_dir: Path,
-                                          max_attempts: int = 4, backoff_seconds: float = 10.0) -> None:
-    """Fully automatic: retries the flaky gdown --folder listing itself --
-    upgrades gdown once (the failure is often gdown falling behind a
-    changed Drive page format) then keeps retrying with backoff (the
-    failure is also often just transient Drive rate limiting), no
-    intervention needed unless every attempt genuinely exhausts itself."""
-    upgraded = False
-    for attempt in range(1, max_attempts + 1):
-        print(f"[dataset] gdown attempt {attempt}/{max_attempts}...")
-        if _attempt_gdown_folder_download(folder_id, download_dir):
-            return
-        for f in download_dir.iterdir():
-            shutil.rmtree(f) if f.is_dir() else f.unlink()  # clear a partial/empty attempt before retrying
-        if not upgraded:
-            print("[dataset] gdown failed to list the folder -- upgrading gdown and retrying "
-                  "(this failure mode is usually gdown falling behind a Drive page-format change)")
-            _run([sys.executable, "-m", "pip", "install", "-U", "gdown"])
-            upgraded = True
-        elif attempt < max_attempts:
-            print(f"[dataset] still failing -- Drive rate limiting is often transient, "
-                  f"waiting {backoff_seconds:.0f}s before retrying...")
-            time.sleep(backoff_seconds)
+def _write_wider_val_list(entries: list[tuple[str, list]], out_path: Path) -> None:
+    """widerface_eval.py's own convention: one leading-'/' relative path
+    per line (e.g. "/0--Parade/0_Parade_marchingband_1_465.jpg")."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("".join(f"/{fname}\n" for fname, _ in entries))
 
-    raise RuntimeError(
-        f"gdown could not retrieve the Google Drive folder after {max_attempts} automatic attempts "
-        f"(including a gdown upgrade) -- see its output above. This particular folder/network combination "
-        f"may need a manual download: open "
-        f"https://drive.google.com/drive/folders/{folder_id} in a browser, download it, extract it into "
-        f"{download_dir}, and rerun this script (it accepts several sub-layouts once files are actually "
-        f"there -- see _find_split_dir)."
-    )
+
+def _write_label_txt(entries: list[tuple[str, list]], out_path: Path) -> None:
+    """RetinaFace's own label.txt format (see utils/dataset.py's
+    WiderFaceDetection._parse_labels): '# <relative_path>' header lines
+    followed by one 'x1 y1 w h <15 landmark values>' line per face --
+    landmarks are all -1 here (see module docstring's caveat: this source
+    has no real landmark annotations). Images with zero faces are omitted
+    entirely rather than emitted as an empty-body '#' entry -- the loader's
+    own flush-on-next-'#' logic only appends a completed image's boxes when
+    `if labels:` is true, so a genuinely empty entry would desync
+    self.image_paths against self.words for every image after it."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    skipped = 0
+    for fname, boxes in entries:
+        if not boxes:
+            skipped += 1
+            continue
+        lines.append(f"# {fname}")
+        invalid_landmarks = " ".join(["-1"] * 15)
+        for x1, y1, w, h in boxes:
+            lines.append(f"{x1} {y1} {w} {h} {invalid_landmarks}")
+    out_path.write_text("\n".join(lines) + "\n")
+    if skipped:
+        print(f"[dataset] label.txt: skipped {skipped} zero-face image(s) (see _write_label_txt's docstring)")
 
 
 def ensure_dataset(want_train: bool, force: bool) -> None:
@@ -170,45 +187,33 @@ def ensure_dataset(want_train: bool, force: bool) -> None:
         print("[dataset] val/ (and train/, if requested) already present -- skipping download")
         return
 
-    try:
-        import gdown  # noqa: F401
-    except ImportError:
-        _run([sys.executable, "-m", "pip", "install", "gdown"])
-
-    DATA_DIR.parent.mkdir(parents=True, exist_ok=True)
-    download_dir = DATA_DIR.parent / "_widerface_gdrive_download"
-    download_dir.mkdir(exist_ok=True)
-    print(f"[dataset] downloading pre-organized WIDER FACE dataset (Google Drive folder "
-          f"{DATASET_GDRIVE_FOLDER_ID}) -- this can take a while (train+val images)")
-    _download_gdrive_folder_with_retries(DATASET_GDRIVE_FOLDER_ID, download_dir)
-
-    # The folder's own internal layout is expected to already match
-    # data/widerface/{train,val}/... (that's the whole point of the
-    # "pre-organized" bundle) -- move whichever of train/val this call
-    # actually needs into place, leaving the other alone if not requested.
-    extracted_root = download_dir
-    candidates = list(download_dir.rglob("wider_val.txt"))
-    if candidates:
-        extracted_root = candidates[0].parent.parent  # .../widerface/val/wider_val.txt -> .../widerface
-
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"[dataset] downloading annotations from Hugging Face ({DATASET_REPO_ID})...")
+    split_zip = _hf_dataset_file("data/wider_face_split.zip")
+    with zipfile.ZipFile(split_zip) as zf:
+        val_bbx_text = zf.read("wider_face_split/wider_face_val_bbx_gt.txt").decode()
+        train_bbx_text = zf.read("wider_face_split/wider_face_train_bbx_gt.txt").decode() if need_train else None
+
     if need_val:
-        src_val = _find_split_dir(extracted_root, download_dir, "val")
+        print(f"[dataset] downloading WIDER_val.zip from Hugging Face ({DATASET_REPO_ID}) -- "
+              f"this can take a while (~360 MB)...")
+        val_zip = _hf_dataset_file("data/WIDER_val.zip")
         dst_val = DATA_DIR / "val"
-        if dst_val.exists():
-            shutil.rmtree(dst_val)
-        shutil.move(str(src_val), str(dst_val))
-        print(f"[dataset] val/ ready: {dst_val}")
+        _extract_split_images(val_zip, "WIDER_val", dst_val)
+        val_entries = _parse_bbx_gt(val_bbx_text)
+        _write_wider_val_list(val_entries, dst_val / "wider_val.txt")
+        print(f"[dataset] val/ ready: {dst_val} ({len(val_entries)} images)")
 
     if need_train:
-        src_train = _find_split_dir(extracted_root, download_dir, "train")
+        print(f"[dataset] downloading WIDER_train.zip from Hugging Face ({DATASET_REPO_ID}) -- "
+              f"this can take a while (~1.4 GB)...")
+        train_zip = _hf_dataset_file("data/WIDER_train.zip")
         dst_train = DATA_DIR / "train"
-        if dst_train.exists():
-            shutil.rmtree(dst_train)
-        shutil.move(str(src_train), str(dst_train))
-        print(f"[dataset] train/ ready: {dst_train}")
-
-    shutil.rmtree(download_dir, ignore_errors=True)
+        _extract_split_images(train_zip, "WIDER_train", dst_train)
+        train_entries = _parse_bbx_gt(train_bbx_text)
+        _write_label_txt(train_entries, dst_train / "label.txt")
+        print(f"[dataset] train/ ready: {dst_train} ({len(train_entries)} images) -- "
+              f"WARNING: landmarks are all-invalid placeholders, see this module's own docstring")
 
 
 def ensure_eval_tool(force: bool) -> None:
@@ -233,9 +238,8 @@ def ensure_eval_tool(force: bool) -> None:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--val-only", action="store_true",
-                    help="skip data/widerface/train/ -- by default both splits are fetched, since gdown "
-                         "downloads the whole shared folder (train+val together) in one shot regardless, so "
-                         "skipping train afterward only discards already-downloaded data, not bandwidth/time")
+                    help="skip data/widerface/train/ -- by default both splits are fetched. Note train/ here "
+                         "has no real landmark annotations regardless (see module docstring)")
     p.add_argument("--force", action="store_true", help="re-download/rebuild even if already present")
     p.add_argument("--skip-eval-tool", action="store_true", help="skip cloning/building widerface_evaluation")
     args = p.parse_args()
@@ -251,7 +255,8 @@ def main():
           f"(expect 3226 images, 3226 entries)")
     if want_train:
         n_train_images = sum(1 for _ in (DATA_DIR / "train" / "images").rglob("*.jpg")) if _train_ready() else 0
-        print(f"[done] train/: {n_train_images} images on disk (expect 12880)")
+        print(f"[done] train/: {n_train_images} images on disk (expect 12880; a handful of genuinely zero-face "
+              f"images are dropped from label.txt, see _write_label_txt)")
     print(f"[done] eval tool: {'ready' if _eval_tool_ready() else 'NOT ready -- see errors above'}")
 
 
