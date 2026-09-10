@@ -32,6 +32,8 @@ Usage:
         --checkpoint pytorch_export/mobilenetv1_0.25_c16.zip --image-size 640
     python inference/export_onnx.py --network mobilenetv1_0.25 \\
         --checkpoint pytorch_export/mobilenetv1_0.25_float32.pth   # bare .pth: plain float32, no palettization
+    python inference/export_onnx.py --network mobilenetv1 --image-size 640 \\
+        --checkpoint-url https://huggingface.co/azemel/retinaface-xs/resolve/main/results/mobilenetv1/pytorch/mobilenetv1_c12.zip
 """
 
 import argparse
@@ -40,6 +42,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import os
+
 import onnx
 import onnxsim
 import torch
@@ -47,7 +51,9 @@ import torch
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from config import get_config  # noqa: E402
 
-from export_common import RetinaStaticExportWrapper, load_plain_with_clusters, cluster_count  # noqa: E402
+from export_common import (  # noqa: E402
+    RetinaStaticExportWrapper, load_plain_with_clusters, cluster_count, download_from_url,
+)
 from onnx_palettize import apply_palette_to_onnx  # noqa: E402
 
 
@@ -116,17 +122,29 @@ def export_onnx(network: str, checkpoint: str,
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--network", required=True)
-    p.add_argument("--checkpoint", required=True,
+    p.add_argument("--checkpoint", default=None,
                     help="inference/export_pytorch.py's output -- EITHER the combined .zip "
                          "(export_pytorch_batch_hf.py's packing, {state_dict, clusters} in one file) OR a bare "
-                         ".pth (plain state_dict only, for a float32 checkpoint with no cluster info)")
+                         ".pth (plain state_dict only, for a float32 checkpoint with no cluster info). "
+                         "Mutually exclusive with --checkpoint-url.")
+    p.add_argument("--checkpoint-url", default=None,
+                    help="same as --checkpoint, but downloaded first from this URL, e.g. "
+                         "https://huggingface.co/<repo>/resolve/main/results/<network>/pytorch/"
+                         "<network>_<level>.zip. Mutually exclusive with --checkpoint.")
+    p.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"),
+                    help="bearer token for --checkpoint-url against a private repo -- defaults to the "
+                         "HF_TOKEN system variable")
     p.add_argument("--image-size", type=int, default=640)
     p.add_argument("--opset", type=int, default=17)
     p.add_argument("--out-dir", default="onnx_export")
     p.add_argument("--no-simplify", action="store_true", help="skip the onnxsim cleanup pass")
     args = p.parse_args()
+    assert bool(args.checkpoint) != bool(args.checkpoint_url), (
+        "need exactly one of --checkpoint or --checkpoint-url"
+    )
+    checkpoint = args.checkpoint or str(download_from_url(args.checkpoint_url, token=args.hf_token))
 
-    export_onnx(args.network, args.checkpoint,
+    export_onnx(args.network, checkpoint,
                 args.image_size, args.out_dir, args.opset, simplify=not args.no_simplify)
 
 

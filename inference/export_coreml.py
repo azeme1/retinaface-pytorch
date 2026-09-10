@@ -39,12 +39,13 @@ directly; no separate cluster file to manage.
 
 The exported .mlpackage takes a native CoreML image input (uint8, single
 image, no batch dim in the public signature) declared RGB -- this project's
-fixed external contract for every model it ships, regardless of what
-channel order any given checkpoint was actually trained in (this repo
-always trains BGR, cv2's convention). --input-color-order tells the wrapped
-model which permute (if any) to apply internally to get from that RGB input
-back to what its own weights expect -- see RetinaStaticExportWrapper in
-export_common.py.
+fixed external contract for every model it ships, and NOT configurable
+(coremltools has no "give me BGR instead" option for ct.ImageType). Every
+checkpoint in this repo trains BGR (cv2's convention), so the wrapper is
+always built with input_color_order="rgb" here -- telling it the incoming
+tensor IS RGB, so it must permute back to BGR internally before running
+this checkpoint's own BGR-trained weights. See RetinaStaticExportWrapper in
+export_common.py for the permute itself.
 
 Usage:
     python inference/export_coreml.py --network mobilenetv1_0.25 \\
@@ -168,10 +169,6 @@ def main():
     p.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"),
                     help="bearer token for --checkpoint-url against a private repo -- defaults to the "
                          "HF_TOKEN system variable")
-    p.add_argument("--input-color-order", default="bgr", choices=["bgr", "rgb"],
-                    help="channel order this checkpoint's weights were actually trained in (this repo: always "
-                         "bgr, cv2's convention) -- NOT the exported model's own public input format, which is "
-                         "always a native RGB CoreML image regardless of this flag; see RetinaStaticExportWrapper")
     p.add_argument("--image-size", type=int, default=640)
     p.add_argument("--out-dir", default="coreml_export")
     args = p.parse_args()
@@ -184,9 +181,20 @@ def main():
     model, cluster_info = load_plain_with_clusters(cfg, checkpoint)
     num_clusters = cluster_count(cluster_info)
 
+    # ALWAYS "rgb", not a CLI choice: CoreML's ImageType input is
+    # unconditionally RGB (ct.ImageType(color_layout=ct.colorlayout.RGB)
+    # below), regardless of anything this script's caller might want --
+    # there is no way to make CoreML feed this graph BGR pixels, so the
+    # wrapper must always permute RGB->BGR internally to match this
+    # checkpoint's BGR training convention. Passing "bgr" here was a real,
+    # shipped bug: it skipped that permute, so every previously-exported
+    # .mlpackage silently ran with red/blue channels swapped -- confirmed
+    # by a real WIDER FACE AP crashing to ~0% on CoreML while the exact
+    # same checkpoint's PyTorch AP was ~68%. Every .mlpackage built before
+    # this fix needs re-exporting.
     wrapper = RetinaStaticExportWrapper(model, cfg, image_size=(args.image_size, args.image_size),
                                         priors_dtype=torch.float16,
-                                        input_color_order=args.input_color_order).eval()
+                                        input_color_order="rgb").eval()
     replace_leaky_relu(wrapper)  # coremltools 9.0 mlprogram frontend bug, see export_common.py
     sample_x = torch.zeros(1, 3, args.image_size, args.image_size, dtype=torch.float32)
 
@@ -199,11 +207,9 @@ def main():
     # only the cluster count (or "float32").
     tag = f"c{num_clusters}" if num_clusters is not None else "float32"
 
-    # Native CoreML image input -- uint8, single image, declared RGB
-    # regardless of --input-color-order (that flag only controls the
-    # in-graph permute back to this checkpoint's own training order; the
-    # exported model's public input contract is always RGB, this project's
-    # fixed convention across every model it ships).
+    # Native CoreML image input -- uint8, single image, declared RGB --
+    # this project's fixed convention across every model it ships, and the
+    # reason the wrapper above is always built with input_color_order="rgb".
     mlmodel = ct.convert(
         traced,
         convert_to="mlprogram",

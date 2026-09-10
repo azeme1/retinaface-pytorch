@@ -24,7 +24,15 @@ Usage:
     # published HF repo instead of local files (see export_pytorch_batch_hf.py):
     python inference/export_onnx_check.py --network mobilenetv1 \\
         --hf-repo azemel/retinaface-xs --hf-level c7 --image-size 640 --n-images 200
+
+    # or download either artifact from an arbitrary URL directly (e.g. a
+    # private repo's own resolve/main/... link, needs --hf-token or $HF_TOKEN):
+    python inference/export_onnx_check.py --network mobilenetv1 --image-size 640 \\
+        --checkpoint-url https://huggingface.co/azemel/retinaface-xs/resolve/main/results/mobilenetv1/pytorch/mobilenetv1_c12.zip \\
+        --onnx-url https://huggingface.co/azemel/retinaface-xs/resolve/main/results/mobilenetv1/onnx/mobilenetv1_c12.zip
 """
+from __future__ import annotations
+
 import argparse
 import os
 import random
@@ -53,7 +61,7 @@ import widerface_eval as we  # noqa: E402
 sys.path.append(str(Path(__file__).resolve().parent))
 from export_common import (  # noqa: E402
     RetinaStaticExportWrapper, load_plain_with_clusters, load_plain_with_clusters_from_hf,
-    download_hf_artifact, select_device, postprocess, rescale_to_original,
+    download_hf_artifact, select_device, postprocess, rescale_to_original, download_from_url,
 )
 
 DATASET_FOLDER = str(_RETINA_DIR / "data/widerface/val/images/")
@@ -114,9 +122,13 @@ def main():
     p.add_argument("--network", required=True)
     p.add_argument("--checkpoint", default=None, help="local export_pytorch.py output -- combined .zip or "
                                                         "bare .pth (see export_onnx.py's own --checkpoint) -- "
-                                                        "mutually exclusive with --hf-repo")
+                                                        "mutually exclusive with --checkpoint-url/--hf-repo")
+    p.add_argument("--checkpoint-url", default=None, help="download --checkpoint from this URL instead of a "
+                                                            "local file, e.g. a direct link into a Hugging Face "
+                                                            "repo's resolve/main/... path")
     p.add_argument("--onnx-zip", default=None, help="local export_onnx.py output (.zip or raw .onnx) -- "
-                                                      "mutually exclusive with --hf-repo")
+                                                      "mutually exclusive with --onnx-url/--hf-repo")
+    p.add_argument("--onnx-url", default=None, help="download --onnx-zip from this URL instead of a local file")
     p.add_argument("--hf-repo", default=None, help="Hugging Face repo id (e.g. azemel/retinaface-xs) to "
                                                      "pull BOTH the pytorch source and the onnx artifact "
                                                      "from instead of local files -- requires --hf-level")
@@ -124,7 +136,8 @@ def main():
                                                       "export_pytorch_batch_hf.py's tag convention) -- "
                                                       "selects results/<network>/{pytorch,onnx}/<network>_<level>.zip")
     p.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"),
-                    help="bearer token for a private --hf-repo -- defaults to the HF_TOKEN system variable")
+                    help="bearer token for a private repo -- defaults to the HF_TOKEN system variable, used for "
+                         "--hf-repo as well as --checkpoint-url/--onnx-url")
     p.add_argument("--image-size", type=int, default=640)
     p.add_argument("--n-images", type=int, default=None,
                     help="WIDER FACE val images to sample -- default is the FULL val set (3226 images), the "
@@ -134,20 +147,26 @@ def main():
 
     cfg = dict(get_config(args.network))
 
+    def _resolve(local: str | None, url: str | None, label: str) -> str | None:
+        assert not (local and url), f"--{label} and --{label}-url are mutually exclusive"
+        return str(download_from_url(url, token=args.hf_token)) if url else local
+
     if args.hf_repo:
         assert args.hf_level, "--hf-repo needs --hf-level"
-        assert not args.checkpoint and not args.onnx_zip, (
-            "--hf-repo is mutually exclusive with --checkpoint/--onnx-zip"
+        assert not args.checkpoint and not args.checkpoint_url and not args.onnx_zip and not args.onnx_url, (
+            "--hf-repo is mutually exclusive with --checkpoint/--checkpoint-url/--onnx-zip/--onnx-url"
         )
         model, _ = load_plain_with_clusters_from_hf(cfg, args.hf_repo, args.network, args.hf_level,
                                                      token=args.hf_token)
         onnx_zip = download_hf_artifact(args.hf_repo, args.network, "onnx", args.hf_level, token=args.hf_token)
     else:
-        assert args.checkpoint and args.onnx_zip, (
-            "need --checkpoint + --onnx-zip (or --hf-repo + --hf-level instead)"
+        checkpoint_arg = _resolve(args.checkpoint, args.checkpoint_url, "checkpoint")
+        onnx_zip_arg = _resolve(args.onnx_zip, args.onnx_url, "onnx-zip")
+        assert checkpoint_arg and onnx_zip_arg, (
+            "need --checkpoint/--checkpoint-url + --onnx-zip/--onnx-url (or --hf-repo + --hf-level instead)"
         )
-        model, _ = load_plain_with_clusters(cfg, args.checkpoint)
-        onnx_zip = Path(args.onnx_zip)
+        model, _ = load_plain_with_clusters(cfg, checkpoint_arg)
+        onnx_zip = Path(onnx_zip_arg)
 
     wrapper = RetinaStaticExportWrapper(model, cfg, image_size=(args.image_size, args.image_size)).eval()
 
