@@ -105,6 +105,24 @@ def compression_ratio(float32_mb: float, optimized_mb: float) -> float:
     return float32_mb / optimized_mb if optimized_mb else float("inf")
 
 
+_COREML_SUPPORTED_NBITS = (1, 2, 3, 4, 6, 8)
+
+
+def _coreml_nbits(num_clusters: int) -> int:
+    """coremltools' kmeans palettizer only accepts nbits in
+    _COREML_SUPPORTED_NBITS -- notably NOT every width in between (5 and 7
+    are missing), hit in practice by num_clusters=128 (needs exactly 7
+    bits) -- ValueError: Invalid value of "nbits" (7) for palettization.
+    Rounds UP to the smallest supported width that still covers
+    num_clusters distinct values, e.g. 128 clusters -> nbits=8 (up to 256
+    codebook slots, only 128 actually used by kmeans)."""
+    needed = max(1, math.ceil(math.log2(num_clusters)))
+    for nbits in _COREML_SUPPORTED_NBITS:
+        if nbits >= needed:
+            return nbits
+    raise ValueError(f"num_clusters={num_clusters} needs more than 8 bits, unsupported by CoreML palettization")
+
+
 def select_worth_compressing(mlmodel, num_clusters: int, channel_axis: int, weight_threshold: int = 1024) -> list[str]:
     """Names of ops where per-output-channel palettization is a genuine
     on-disk size win, vs. blanket-palettizing everything weight_threshold
@@ -122,7 +140,7 @@ def select_worth_compressing(mlmodel, num_clusters: int, channel_axis: int, weig
     is what actually produces a smaller .mlpackage.
     """
     metadata = cto.get_weights_metadata(mlmodel, weight_threshold=weight_threshold)
-    index_bits = max(1, math.ceil(math.log2(num_clusters)))
+    index_bits = _coreml_nbits(num_clusters)
     worth_it = []
     for name, meta in metadata.items():
         shape = meta.val.shape
@@ -142,7 +160,7 @@ def apply_palette_selective(mlmodel, num_clusters: int, channel_axis: int, weigh
     select_worth_compressing flags as an actual net size win -- everything
     else is left float32 untouched rather than blanket-compressed."""
     worth_it = select_worth_compressing(mlmodel, num_clusters, channel_axis, weight_threshold)
-    nbits = max(1, math.ceil(math.log2(num_clusters)))
+    nbits = _coreml_nbits(num_clusters)
     palettizer = cto.OpPalettizerConfig(
         mode="kmeans", nbits=nbits, granularity="per_grouped_channel",
         group_size=1, channel_axis=channel_axis, weight_threshold=weight_threshold,

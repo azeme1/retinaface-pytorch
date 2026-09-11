@@ -225,6 +225,13 @@ def _build_from_payload(cfg: dict, payload: dict) -> tuple[nn.Module, dict]:
     {"state_dict": ..., "clusters": ...} dict export_pytorch_batch_hf.py
     packs into one checkpoint.pth, regardless of whether it arrived via a
     local zip or a Hugging Face download."""
+    # pretrain=False: the backbone's ImageNet-pretrained init is about to be
+    # overwritten by load_state_dict below anyway, but building it still
+    # tries to read a local weights/<backbone>.pretrained file first -- one
+    # that isn't shipped for every backbone (confirmed missing for the
+    # mobilenetv1_0.25/0.50 width variants), crashing export for those with
+    # a FileNotFoundError before load_state_dict ever runs.
+    cfg = dict(cfg, pretrain=False)
     model = RetinaFace(cfg=cfg)
     model.load_state_dict(payload["state_dict"])  # strict=True
     model.eval()
@@ -265,7 +272,7 @@ def load_plain_with_clusters(cfg: dict, plain_checkpoint: str, clusters_path: st
     if str(plain_checkpoint).endswith(".zip"):
         return load_plain_with_clusters_from_zip(cfg, plain_checkpoint)
 
-    model = RetinaFace(cfg=cfg)
+    model = RetinaFace(cfg=dict(cfg, pretrain=False))  # see _build_from_payload's comment on pretrain=False
     state_dict = torch.load(plain_checkpoint, map_location="cpu", weights_only=True)
     model.load_state_dict(state_dict)  # strict=True: confirms this really is a plain checkpoint
     model.eval()
