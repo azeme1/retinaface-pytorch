@@ -16,6 +16,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -369,9 +370,10 @@ def postprocess(boxes, scores, landmarks, conf_threshold: float = 0.5, nms_thres
 def rescale_to_original(boxes, landmarks, image_size: int, native_w: int, native_h: int):
     """Rescales boxes/landmarks from the fixed image_size x image_size
     export canvas (see RetinaStaticExportWrapper) back to one image's own
-    native resolution. x and y use INDEPENDENT scale factors on purpose --
-    the export's own preprocessing is a stretch-resize, not
-    aspect-preserving, so a single uniform scale would be wrong."""
+    native resolution, for a NON-aspect-preserving stretch-resize (x and y
+    scaled independently). Superseded by letterbox_resize/unletterbox
+    below for actual accuracy -- kept only for anything that deliberately
+    still wants stretch behavior."""
     if boxes.shape[0] == 0:
         return boxes, landmarks
     sx, sy = native_w / image_size, native_h / image_size
@@ -382,3 +384,38 @@ def rescale_to_original(boxes, landmarks, image_size: int, native_w: int, native
     landmarks[:, 0::2] *= sx
     landmarks[:, 1::2] *= sy
     return boxes, landmarks
+
+
+# BGR order, matches RetinaStaticExportWrapper's own rgb_mean buffer -- padding
+# with exactly this value means the padded region becomes precisely 0 after
+# the wrapper's internal mean-subtraction, contributing no spurious signal.
+LETTERBOX_PAD_VALUE_BGR = (104, 117, 123)
+
+
+def letterbox_resize(img_bgr, image_size: int, pad_value=LETTERBOX_PAD_VALUE_BGR):
+    """Aspect-preserving resize into a fixed image_size x image_size canvas:
+    scales the image down/up by ONE uniform factor (so shapes aren't
+    distorted, unlike a plain stretch-resize) and places the result at the
+    canvas's TOP-LEFT corner, padding only the bottom/right edges. Placing
+    at (0, 0) instead of centering is deliberate -- it means unletterbox()
+    below is a pure division by scale, no offset subtraction, so there is
+    no separate padding math to get wrong when mapping detections back to
+    the original image. Returns (canvas, scale) -- scale is what
+    unletterbox() needs."""
+    h, w = img_bgr.shape[:2]
+    scale = min(image_size / w, image_size / h)
+    new_w, new_h = int(round(w * scale)), int(round(h * scale))
+    resized = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    canvas = np.full((image_size, image_size, 3), pad_value, dtype=img_bgr.dtype)
+    canvas[:new_h, :new_w] = resized
+    return canvas, scale
+
+
+def unletterbox(boxes, landmarks, scale: float):
+    """Inverse of letterbox_resize's placement: boxes/landmarks come back
+    in canvas pixel space, and since the resized image sits at the
+    canvas's (0, 0) origin with no offset, mapping back to the original
+    image is a single division by scale -- no padding offset involved."""
+    if boxes.shape[0] == 0:
+        return boxes, landmarks
+    return boxes / scale, landmarks / scale

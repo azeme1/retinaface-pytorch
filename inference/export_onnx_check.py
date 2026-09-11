@@ -61,7 +61,7 @@ import widerface_eval as we  # noqa: E402
 sys.path.append(str(Path(__file__).resolve().parent))
 from export_common import (  # noqa: E402
     RetinaStaticExportWrapper, load_plain_with_clusters, load_plain_with_clusters_from_hf,
-    download_hf_artifact, select_device, postprocess, rescale_to_original, download_from_url,
+    download_hf_artifact, select_device, postprocess, letterbox_resize, unletterbox, download_from_url,
 )
 
 DATASET_FOLDER = str(_RETINA_DIR / "data/widerface/val/images/")
@@ -69,15 +69,18 @@ VAL_LIST = str(_RETINA_DIR / "data/widerface/val/wider_val.txt")
 GT_DIR = str(_RETINA_DIR / "widerface_evaluation/ground_truth")
 
 
-def preprocess(img_bgr: np.ndarray, image_size: int) -> np.ndarray:
-    """Fixed-shape stretch-resize matching RetinaStaticExportWrapper's own
-    assumption (no aspect-preserving letterboxing -- see its docstring).
-    Returns 1,3,H,W float32 BGR (this repo's own export/training order --
-    export_onnx.py's graph has no input-color-order handling, unlike
-    export_coreml.py's native-RGB-image path, since ONNX has no built-in
-    image type: the raw tensor IS the contract, so it stays BGR here)."""
-    resized = cv2.resize(img_bgr, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
-    return np.float32(resized).transpose(2, 0, 1)[None]
+def preprocess(img_bgr: np.ndarray, image_size: int) -> tuple[np.ndarray, float]:
+    """Aspect-preserving letterbox into the fixed image_size x image_size
+    canvas (see export_common.letterbox_resize) -- confirmed empirically
+    that a naive non-aspect-preserving stretch here collapses real AP
+    (87.33% -> 68.13% on mobilenetv1 c7, Hard nearly halved), so this is
+    not a cosmetic choice. Returns (1,3,H,W float32 BGR -- this repo's own
+    export/training order, since ONNX has no built-in image type: the raw
+    tensor IS the contract, so it stays BGR here -- scale: needed by
+    unletterbox() to map detections back to this image's native
+    resolution)."""
+    canvas, scale = letterbox_resize(img_bgr, image_size)
+    return np.float32(canvas).transpose(2, 0, 1)[None], scale
 
 
 
@@ -183,7 +186,17 @@ def main():
     else:
         onnx_path = str(onnx_zip)
 
-    session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    # Auto-select GPU for the ONNX side too, matching select_device()'s
+    # PyTorch-side logic -- previously hardcoded to CPUExecutionProvider
+    # regardless of what hardware was available. CUDAExecutionProvider
+    # sessions are documented as safe for concurrent Run() calls from
+    # multiple threads (same as CPUExecutionProvider), so no extra lock
+    # needed for the ThreadPoolExecutor below.
+    available = ort.get_available_providers()
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "CUDAExecutionProvider" in available \
+        else ["CPUExecutionProvider"]
+    session = ort.InferenceSession(onnx_path, providers=providers)
+    print(f"ONNX Runtime using: {session.get_providers()[0]}")
     input_name = session.get_inputs()[0].name
 
     with open(VAL_LIST) as f:
@@ -232,17 +245,16 @@ def main():
         img_bgr = cv2.imread(str(Path(DATASET_FOLDER) / name), cv2.IMREAD_COLOR)
         if img_bgr is None:
             return None
-        native_h, native_w = img_bgr.shape[:2]
-        pt_input = preprocess(img_bgr, args.image_size)
+        pt_input, scale = preprocess(img_bgr, args.image_size)
 
         pt_boxes, pt_scores, pt_landm = run_pytorch(pt_input)
         d_boxes, d_scores, d_landm = postprocess(pt_boxes, pt_scores, pt_landm)
-        d_boxes, d_landm = rescale_to_original(d_boxes, d_landm, args.image_size, native_w, native_h)
+        d_boxes, d_landm = unletterbox(d_boxes, d_landm, scale)
         write_prediction(pt_pred_dir, name, d_boxes, d_scores)
 
         onnx_boxes, onnx_scores, onnx_landm = run_onnx(pt_input)
         o_boxes, o_scores, o_landm = postprocess(onnx_boxes, onnx_scores, onnx_landm)
-        o_boxes, o_landm = rescale_to_original(o_boxes, o_landm, args.image_size, native_w, native_h)
+        o_boxes, o_landm = unletterbox(o_boxes, o_landm, scale)
         write_prediction(onnx_pred_dir, name, o_boxes, o_scores)
 
         return {

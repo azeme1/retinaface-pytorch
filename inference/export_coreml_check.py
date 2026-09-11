@@ -66,7 +66,7 @@ sys.path.append(str(Path(__file__).resolve().parent))
 from export_common import (  # noqa: E402
     RetinaStaticExportWrapper, load_plain_with_clusters, load_plain_with_clusters_from_hf,
     download_hf_artifact, replace_leaky_relu, download_from_url, select_device,
-    postprocess, rescale_to_original,
+    postprocess, letterbox_resize, unletterbox,
 )
 
 DATASET_FOLDER = str(_RETINA_DIR / "data/widerface/val/images/")
@@ -74,19 +74,23 @@ VAL_LIST = str(_RETINA_DIR / "data/widerface/val/wider_val.txt")
 GT_DIR = str(_RETINA_DIR / "widerface_evaluation/ground_truth")
 
 
-def preprocess(img_bgr: np.ndarray, image_size: int, input_color_order: str) -> tuple[np.ndarray, np.ndarray]:
-    """Fixed-shape stretch-resize matching RetinaStaticExportWrapper's own
-    assumption (no aspect-preserving letterboxing -- see its docstring).
-    Returns (pytorch_input: 1,3,H,W float32 in input_color_order, coreml_input:
-    H,W,3 uint8 RGB -- CoreML's native image input is always declared RGB
-    regardless of input_color_order, see export_coreml.py)."""
-    resized_bgr = cv2.resize(img_bgr, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
-    resized_rgb = cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB)
+def preprocess(img_bgr: np.ndarray, image_size: int, input_color_order: str) -> tuple[np.ndarray, np.ndarray, float]:
+    """Aspect-preserving letterbox into the fixed image_size x image_size
+    canvas (see export_common.letterbox_resize) -- confirmed empirically
+    that a naive non-aspect-preserving stretch here collapses real AP
+    (87.33% -> 68.13% on mobilenetv1 c7, Hard nearly halved), so this is
+    not a cosmetic choice. Returns (pytorch_input: 1,3,H,W float32 in
+    input_color_order, coreml_input: H,W,3 uint8 RGB -- CoreML's native
+    image input is always declared RGB regardless of input_color_order,
+    see export_coreml.py -- scale: needed by unletterbox() to map
+    detections back to this image's native resolution)."""
+    canvas_bgr, scale = letterbox_resize(img_bgr, image_size)
+    canvas_rgb = cv2.cvtColor(canvas_bgr, cv2.COLOR_BGR2RGB)
 
-    ordered = resized_rgb if input_color_order == "rgb" else resized_bgr
+    ordered = canvas_rgb if input_color_order == "rgb" else canvas_bgr
     pt_input = np.float32(ordered).transpose(2, 0, 1)[None]  # 1,3,H,W
-    cml_input = resized_rgb.astype(np.uint8)  # H,W,3 -- CoreML's own ImageType input
-    return pt_input, cml_input
+    cml_input = canvas_rgb.astype(np.uint8)  # H,W,3 -- CoreML's own ImageType input
+    return pt_input, cml_input, scale
 
 
 def print_ap_report(aps: dict) -> None:
@@ -274,19 +278,18 @@ def main():
         img_bgr = cv2.imread(str(Path(DATASET_FOLDER) / name), cv2.IMREAD_COLOR)
         if img_bgr is None:
             return None
-        native_h, native_w = img_bgr.shape[:2]
-        pt_input, cml_input = preprocess(img_bgr, args.image_size, args.input_color_order)
+        pt_input, cml_input, scale = preprocess(img_bgr, args.image_size, args.input_color_order)
 
         pt_boxes, pt_scores, pt_landm = run_pytorch(pt_input)
         d_boxes, d_scores, d_landm = postprocess(pt_boxes, pt_scores, pt_landm)
-        d_boxes, d_landm = rescale_to_original(d_boxes, d_landm, args.image_size, native_w, native_h)
+        d_boxes, d_landm = unletterbox(d_boxes, d_landm, scale)
         write_prediction(pt_pred_dir, name, d_boxes, d_scores)
 
         parity = None
         if can_run_coreml:
             cml_boxes, cml_scores, cml_landm = run_coreml(cml_input)
             c_boxes, c_scores, c_landm = postprocess(cml_boxes, cml_scores, cml_landm)
-            c_boxes, c_landm = rescale_to_original(c_boxes, c_landm, args.image_size, native_w, native_h)
+            c_boxes, c_landm = unletterbox(c_boxes, c_landm, scale)
             write_prediction(cml_pred_dir, name, c_boxes, c_scores)
             parity = {
                 "boxes": float(np.abs(pt_boxes - cml_boxes).max()),
