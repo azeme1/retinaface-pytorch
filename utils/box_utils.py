@@ -1,8 +1,31 @@
+from __future__ import annotations
+
+import math
+
 import numpy as np
 from typing import Tuple
 
 import torch
 from torch import nn, Tensor
+
+# Same conservative bound Detectron2/Faster-RCNN use for box regression
+# (math.log(1000. / 16)): caps exp()'s argument in decode() below so a
+# raw, never-trained-toward-any-target loc value (background/garbage
+# anchors -- real detections keep loc small on their own) can't blow the
+# decoded box size up toward overflow. Confirmed necessary in practice, not
+# just theoretical: a real exported RetinaFace .mlpackage produced finite,
+# reasonable output on PyTorch (CPU and MPS) and CoreML's CPU_ONLY compute
+# path for a real WIDER FACE image, but the SAME image on CoreML's GPU/ANE
+# path (compute_units=ALL, CoreML's own default) decoded some anchors'
+# loc into exp() arguments large enough to overflow to inf/1e27-scale
+# garbage -- CPU and GPU/ANE evidently don't accumulate identical rounding
+# error through the preceding conv stack, and only GPU/ANE crossed the
+# threshold. Clamping here makes the decode numerically safe on every
+# backend regardless of that rounding-error difference, with no effect on
+# real detections (already far below this bound) or on final NMS output
+# (garbage/background anchors get a very large but finite box instead of
+# inf, and are filtered by confidence thresholding either way).
+_MAX_EXP_INPUT = math.log(1000.0 / 16)
 
 
 def xywh2xyxy(boxes: Tensor | np.ndarray) -> Tensor | np.ndarray:
@@ -239,8 +262,10 @@ def decode(loc, priors, variances):
     # Compute centers of predicted boxes
     cxcy = priors[:, :2] + loc[:, :2] * variances[0] * priors[:, 2:]
 
-    # Compute widths and heights of predicted boxes
-    wh = priors[:, 2:] * torch.exp(loc[:, 2:] * variances[1])
+    # Compute widths and heights of predicted boxes -- clamped before exp()
+    # to prevent overflow on backends whose rounding error pushes a
+    # background-anchor's raw loc value over the edge; see _MAX_EXP_INPUT.
+    wh = priors[:, 2:] * torch.exp(torch.clamp(loc[:, 2:] * variances[1], max=_MAX_EXP_INPUT))
 
     # Convert center, size to corner coordinates
     boxes = torch.empty_like(loc)
