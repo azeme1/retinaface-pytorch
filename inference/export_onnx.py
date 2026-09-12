@@ -65,7 +65,8 @@ def path_size_mb(path: str) -> float:
 
 
 def export_onnx(network: str, checkpoint: str,
-                 image_size: int, out_dir: str, opset: int = 17, simplify: bool = True) -> Path:
+                 image_size: int, out_dir: str, opset: int = 17, simplify: bool = True,
+                 palettize: bool = True) -> Path:
     cfg = dict(get_config(network))
     model, cluster_info = load_plain_with_clusters(cfg, checkpoint)
     num_clusters = cluster_count(cluster_info)
@@ -101,10 +102,14 @@ def export_onnx(network: str, checkpoint: str,
             if not ok:
                 raise RuntimeError("onnxsim simplification failed to validate")
 
-        if num_clusters is not None:
+        if num_clusters is not None and palettize:
             onnx_model, compressed = apply_palette_to_onnx(onnx_model, num_clusters=num_clusters)
             print(f"palettized {len(compressed)} weight tensor(s) out of "
                   f"{sum(1 for n in onnx_model.graph.node if n.op_type == 'Conv')} conv layers")
+        elif num_clusters is not None:
+            print(f"palettize=False: keeping dense float32 weights (already snapped to their "
+                  f"{num_clusters}-cluster values by training -- accuracy is identical either way, "
+                  f"this only affects on-disk size/graph structure, see --no-palettize's own help)")
 
         onnx.checker.check_model(onnx_model)
         onnx.save(onnx_model, str(onnx_path))
@@ -114,8 +119,9 @@ def export_onnx(network: str, checkpoint: str,
             zf.write(onnx_path, arcname="model.onnx")
 
     zip_mb = path_size_mb(zip_path)
-    print(f"ONNX model ({'palettized' if num_clusters is not None else 'float32'}): "
-          f"{size_mb:.2f} MB raw, {zip_mb:.2f} MB zipped -> {zip_path}")
+    tag_str = "palettized" if (num_clusters is not None and palettize) else \
+        "dense, --no-palettize" if num_clusters is not None else "float32"
+    print(f"ONNX model ({tag_str}): {size_mb:.2f} MB raw, {zip_mb:.2f} MB zipped -> {zip_path}")
     return zip_path
 
 
@@ -138,6 +144,18 @@ def main():
     p.add_argument("--opset", type=int, default=17)
     p.add_argument("--out-dir", default="onnx_export")
     p.add_argument("--no-simplify", action="store_true", help="skip the onnxsim cleanup pass")
+    p.add_argument("--no-palettize", action="store_true",
+                    help="keep dense float32 weights instead of the Gather-based per-output-channel "
+                         "palettization encoding -- same accuracy (the checkpoint's weights are already "
+                         "snapped to their cluster values by training either way), just a plain graph. "
+                         "Use this for export_tflite.py's input: onnx2tf's Conv op conversion mis-handles "
+                         "grouped/depthwise convolutions when they follow this repo's Gather-based "
+                         "dequantization chain (confirmed: 'Depth of output (1) is not a multiple of the "
+                         "number of groups' on mobilenetv1's depthwise-separable convs) -- and palettization "
+                         "provides no TFLite-side benefit anyway, since onnx2tf constant-folds the whole "
+                         "Gather chain back into one dense tensor before the .tflite is ever written (see "
+                         "export_tflite.py's own docstring), so a palettized and a --no-palettize .onnx of "
+                         "the same checkpoint produce byte-for-byte identical plain .tflite files regardless.")
     args = p.parse_args()
     assert bool(args.checkpoint) != bool(args.checkpoint_url), (
         "need exactly one of --checkpoint or --checkpoint-url"
@@ -145,7 +163,8 @@ def main():
     checkpoint = args.checkpoint or str(download_from_url(args.checkpoint_url, token=args.hf_token))
 
     export_onnx(args.network, checkpoint,
-                args.image_size, args.out_dir, args.opset, simplify=not args.no_simplify)
+                args.image_size, args.out_dir, args.opset, simplify=not args.no_simplify,
+                palettize=not args.no_palettize)
 
 
 if __name__ == "__main__":

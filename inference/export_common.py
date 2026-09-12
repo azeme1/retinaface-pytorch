@@ -28,11 +28,23 @@ from models import RetinaFace  # noqa: E402
 from utils.box_utils import decode  # noqa: E402
 
 
-def select_device() -> torch.device:
+def select_device(force: str | None = None) -> torch.device:
     """Best available device for eager PyTorch inference: CUDA, then Apple
     Silicon MPS, else CPU -- used by the check scripts' "PyTorch reference"
     side (the exported CoreML/ONNX/etc. artifact runs on its own separate
-    engine regardless of this)."""
+    engine regardless of this). Pass force="cpu"/"cuda"/"mps" to skip
+    auto-selection (e.g. export_check.py's --format onnx forces this to
+    match --onnx-provider, so a --onnx-provider CPU run doesn't compare a
+    CPU-side ONNX Runtime session against a GPU-computed "reference" --
+    asserts the requested device is actually available rather than silently
+    falling back)."""
+    if force is not None:
+        assert force in ("cpu", "cuda", "mps"), f"force must be cpu/cuda/mps, got {force!r}"
+        if force == "cuda":
+            assert torch.cuda.is_available(), "force='cuda' but CUDA is not available"
+        if force == "mps":
+            assert torch.backends.mps.is_available(), "force='mps' but MPS is not available"
+        return torch.device(force)
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
