@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
+import torchvision.ops
 from huggingface_hub import hf_hub_download
 
 
@@ -344,23 +345,12 @@ def download_from_url(url: str, token: str | None = None) -> Path:
 
 
 def nms(dets, thresh: float) -> list[int]:
-    x1, y1, x2, y2, scores = dets[:, 0], dets[:, 1], dets[:, 2], dets[:, 3], dets[:, 4]
-    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
-    order = scores.argsort()[::-1]
-    keep = []
-    while order.size > 0:
-        i = order[0]
-        keep.append(int(i))
-        xx1 = np.maximum(x1[i], x1[order[1:]])
-        yy1 = np.maximum(y1[i], y1[order[1:]])
-        xx2 = np.minimum(x2[i], x2[order[1:]])
-        yy2 = np.minimum(y2[i], y2[order[1:]])
-        w = np.maximum(0.0, xx2 - xx1 + 1)
-        h = np.maximum(0.0, yy2 - yy1 + 1)
-        inter = w * h
-        overlap = inter / (areas[i] + areas[order[1:]] - inter)
-        order = order[np.where(overlap <= thresh)[0] + 1]
-    return keep
+    """dets: [N,5] (x1,y1,x2,y2,score). torchvision.ops.nms's own CPU/CUDA
+    kernel -- battle-tested, no hand-rolled IoU/division-by-zero edge cases
+    to get wrong -- instead of a custom numpy re-implementation."""
+    boxes = torch.as_tensor(dets[:, :4], dtype=torch.float32)
+    scores = torch.as_tensor(dets[:, 4], dtype=torch.float32)
+    return torchvision.ops.nms(boxes, scores, thresh).tolist()
 
 
 def postprocess(boxes, scores, landmarks, conf_threshold: float = 0.5, nms_threshold: float = 0.4, top_k: int = 750):

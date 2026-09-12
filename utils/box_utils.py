@@ -14,17 +14,21 @@ from torch import nn, Tensor
 # anchors -- real detections keep loc small on their own) can't blow the
 # decoded box size up toward overflow. Confirmed necessary in practice, not
 # just theoretical: a real exported RetinaFace .mlpackage produced finite,
-# reasonable output on PyTorch (CPU and MPS) and CoreML's CPU_ONLY compute
-# path for a real WIDER FACE image, but the SAME image on CoreML's GPU/ANE
-# path (compute_units=ALL, CoreML's own default) decoded some anchors'
-# loc into exp() arguments large enough to overflow to inf/1e27-scale
-# garbage -- CPU and GPU/ANE evidently don't accumulate identical rounding
-# error through the preceding conv stack, and only GPU/ANE crossed the
-# threshold. Clamping here makes the decode numerically safe on every
-# backend regardless of that rounding-error difference, with no effect on
-# real detections (already far below this bound) or on final NMS output
-# (garbage/background anchors get a very large but finite box instead of
-# inf, and are filtered by confidence thresholding either way).
+# reasonable output on PyTorch (CPU and MPS) and ONNX Runtime, but some
+# CoreML exports (confirmed even under compute_units=CPU_ONLY, not just
+# GPU/ANE as first suspected) still decoded some anchors' loc into exp()
+# arguments far beyond this bound at actual runtime, DESPITE the exported
+# MIL program's clip op being verified correct (right op, right bound,
+# directly feeding the sole exp() op -- inspected directly from the
+# .mlpackage's own spec, no .predict() needed). The one thing distinguishing
+# a single-sided torch.clamp(x, max=M) from every other framework's usual
+# two-sided clamp: PyTorch/coremltools trace it with an implicit lower bound
+# of -3.4028235e+38 (float32's most-negative representable value, used as
+# a "no lower bound" sentinel) -- suspected culprit is CoreML's own clip
+# kernel doing an internal subtraction against that sentinel (e.g. x - alpha)
+# that itself overflows. Bounding BOTH sides with ordinary finite numbers
+# avoids that sentinel value entirely; -M is already far more negative than
+# any real loc value ever needs (exp(-M) is already ~0).
 _MAX_EXP_INPUT = math.log(1000.0 / 16)
 
 
@@ -262,10 +266,11 @@ def decode(loc, priors, variances):
     # Compute centers of predicted boxes
     cxcy = priors[:, :2] + loc[:, :2] * variances[0] * priors[:, 2:]
 
-    # Compute widths and heights of predicted boxes -- clamped before exp()
-    # to prevent overflow on backends whose rounding error pushes a
-    # background-anchor's raw loc value over the edge; see _MAX_EXP_INPUT.
-    wh = priors[:, 2:] * torch.exp(torch.clamp(loc[:, 2:] * variances[1], max=_MAX_EXP_INPUT))
+    # Compute widths and heights of predicted boxes -- clamped BOTH sides
+    # before exp() (not just max=): a one-sided torch.clamp traces with an
+    # implicit -3.4e38 lower bound, a sentinel CoreML's clip kernel appears
+    # to mishandle at actual runtime; see _MAX_EXP_INPUT's comment.
+    wh = priors[:, 2:] * torch.exp(torch.clamp(loc[:, 2:] * variances[1], min=-_MAX_EXP_INPUT, max=_MAX_EXP_INPUT))
 
     # Convert center, size to corner coordinates
     boxes = torch.empty_like(loc)
