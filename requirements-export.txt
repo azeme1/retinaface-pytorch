@@ -1,0 +1,25 @@
+# Extra dependencies for scripts/export_*.py and push_to_hub.py, on top of
+# this repo's own requirements.txt. Install only what you need:
+#   - export_onnx.py:    onnx, onnxsim, onnxruntime
+#   - export_tflite.py:  onnx2tf, tensorflow, tf_keras
+#   - export_coreml.py:  coremltools
+#   - export_ncnn.py:    pnnx (conversion), ncnn (for testing the output -- see the module's own caveats)
+#   - export_tfjs.py:    tensorflowjs -- install in a SEPARATE venv from everything else here, see
+#                         that script's module docstring for a known-broken-install issue as of writing
+#   - push_to_hub.py:    huggingface_hub
+#
+# Versions below are what this was developed and tested against -- not
+# hard pins, just a known-working snapshot.
+
+onnx~=1.20.1
+onnxsim~=0.6.5
+onnxruntime~=1.26.0
+onnx2tf~=2.6.7
+tensorflow~=2.21.0
+tf_keras~=2.21.0
+coremltools~=9.0
+pnnx~=20260526
+ncnn~=1.0.20260526
+huggingface_hub~=1.18.0
+
+# tensorflowjs: install separately, see scripts/export_tfjs.py's docstring
