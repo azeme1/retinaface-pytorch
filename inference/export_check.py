@@ -107,20 +107,29 @@ def preprocess(img_bgr: np.ndarray, image_size: int, fmt: str,
     (87.33% -> 68.13% on mobilenetv1 c7, Hard nearly halved), so this is not
     a cosmetic choice. Returns (pt_input, backend_input, scale) -- scale is
     needed by unletterbox() to map detections back to this image's native
-    resolution. pt_input is always 1,3,H,W float32 CHW (what the PyTorch
-    wrapper expects); backend_input is format-specific:
+    resolution. backend_input is format-specific:
       - onnx:   identical to pt_input (ONNX Runtime takes the same NCHW tensor)
       - coreml: H,W,3 uint8 RGB -- CoreML's native image input is always
                 declared RGB regardless of input_color_order (see export_coreml.py)
       - tflite: 1,H,W,3 float32 NHWC BGR (onnx2tf's conversion lands the
                 model on NHWC, not NCHW -- see export_tflite.py's docstring)
+    For coreml, pt_input is raw uint8 CHW (matching the real deployment
+    contract -- a raw image, normalization done INSIDE the wrapper, see
+    RetinaStaticExportWrapper.forward's mean-subtraction) in
+    input_color_order's own order: "bgr" (this checkpoint's own training
+    convention, the default) needs no permute so pt_input is plain
+    canvas_bgr; "rgb" mirrors what CoreML's ImageType always hands the
+    exported graph (RGB), relying on the wrapper's own internal RGB->BGR
+    permute to match training, same as the exported artifact does. onnx/
+    tflite keep float32 pt_input -- their own exported graphs were traced
+    against a float32 dummy input, unlike CoreML's native uint8 ImageType.
     """
     canvas_bgr, scale = letterbox_resize(img_bgr, image_size)
 
     if fmt == "coreml":
         canvas_rgb = cv2.cvtColor(canvas_bgr, cv2.COLOR_BGR2RGB)
         ordered = canvas_rgb if input_color_order == "rgb" else canvas_bgr
-        pt_input = np.float32(ordered).transpose(2, 0, 1)[None]
+        pt_input = ordered.astype(np.uint8).transpose(2, 0, 1)[None]
         backend_input = canvas_rgb.astype(np.uint8)
     elif fmt == "tflite":
         pt_input = np.float32(canvas_bgr).transpose(2, 0, 1)[None]

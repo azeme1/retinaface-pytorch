@@ -38,12 +38,20 @@ from pathlib import Path
 
 EVAL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EVAL_DIR.parent
+INFER_DIR = REPO_ROOT / "inference"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if str(INFER_DIR) not in sys.path:
+    sys.path.insert(0, str(INFER_DIR))
 import widerface_eval as we  # noqa: E402
+from export_common import download_hf_artifact  # noqa: E402
 
-# Matches DEFAULT_ANNEAL_SCHEDULE in train_lut_quant.py.
-FULL_SCHEDULE = [256, 128, 64, 32, 16, 12, 8, 7, 6, 5, 4, 3, 2]
+# Every level this project has published plain+clusters checkpoints for on
+# the HF repo (results/<network>/pytorch/<network>_<level>.zip) -- a level
+# missing for a given --network is just skipped below (download_hf_artifact
+# raises, caught per-level), same tolerance the old local-file existence
+# check had.
+FULL_SCHEDULE = ["c256", "c128", "c64", "c32", "c16", "c12", "c8", "c7", "c6", "c5", "c4", "c3", "c2"]
 
 
 def _gpu_usage_fraction() -> float:
@@ -82,8 +90,14 @@ def _ram_usage_fraction() -> float:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--network", required=True)
-    p.add_argument("--results-dir", required=True)
-    p.add_argument("--granularity", default="output", choices=["global", "output", "input"])
+    p.add_argument("--results-dir", required=True, help="output directory for this run's own "
+                    "full_eval_parallel/ report -- checkpoints themselves come from --hf-repo, "
+                    "not read from here")
+    p.add_argument("--hf-repo", default="azemel/retinaface-xs",
+                    help="HF repo every level's plain+clusters checkpoint is downloaded from "
+                         "(results/<network>/pytorch/<network>_<level>.zip) -- see "
+                         "inference/export_common.py's download_hf_artifact")
+    p.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"))
     p.add_argument("--mem-threshold", type=float, default=0.90,
                     help="launch another pass only while GPU-memory and system-RAM usage both "
                          "stay under this fraction of their totals")
@@ -127,51 +141,35 @@ def main():
                          "batch runs at the lowest CPU/IO scheduling priority so it soaks up "
                          "idle capacity without competing with anything else (e.g. a concurrent "
                          "training run) that wants the same cores")
-    p.add_argument("--include-baseline", action="store_true", default=True)
-    p.add_argument("--baseline-checkpoint", default=None,
-                    help="float32 checkpoint for the baseline row; defaults to "
-                         "<results-dir>/<network>_baseline_fp32.pth if present, else the "
-                         "report.json's recorded baseline_source")
-    p.add_argument("--fused-bn", action="store_true",
-                    help="pass through to every worker.py invocation -- must match how "
-                         "the checkpoints in --results-dir were quantized (train_lut_quant.py's "
-                         "--fused-bn). Default (off) matches train_lut_quant.py's own default "
-                         "(apply_lut_quantization, no-fuse); only pass this when the checkpoints "
-                         "were themselves trained with --fused-bn (quantize_graph).")
+    p.add_argument("--include-baseline", action="store_true", default=True,
+                    help="also run the \"float32\" HF level as an unquantized baseline row")
     args = p.parse_args()
 
     results_dir = Path(args.results_dir)
     out_dir = results_dir / "full_eval_parallel"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    jobs = []  # list of (label, cmd, out_json_path)
+    jobs = []  # list of (label, level, checkpoint_path, out_json_path)
 
     if args.include_baseline:
-        baseline_ckpt = args.baseline_checkpoint
-        if baseline_ckpt is None:
-            candidate = results_dir / f"{args.network}_baseline_fp32.pth"
-            if candidate.exists():
-                baseline_ckpt = str(candidate)
-            else:
-                report_path = results_dir / "report.json"
-                if report_path.exists():
-                    report = json.loads(report_path.read_text())
-                    src = report.get("baseline_source")
-                    if src and src != "trained_from_scratch":
-                        baseline_ckpt = src
-        if baseline_ckpt:
+        try:
+            baseline_ckpt = str(download_hf_artifact(args.hf_repo, args.network, "pytorch", "float32",
+                                                       token=args.hf_token))
             out_json = out_dir / "baseline.json"
-            jobs.append(("baseline", None, baseline_ckpt, out_json))
-        else:
-            print("[run_parallel] no baseline checkpoint found -- skipping baseline row")
+            jobs.append(("baseline", "float32", baseline_ckpt, out_json))
+        except Exception as e:  # noqa: BLE001 -- no float32 level published for this network
+            print(f"[run_parallel] no float32 checkpoint on {args.hf_repo} for {args.network} "
+                  f"({type(e).__name__}) -- skipping baseline row")
 
-    for k in FULL_SCHEDULE:
-        ckpt = results_dir / f"{args.network}_lut{k}_checkpoint.pth"
-        if not ckpt.exists():
-            print(f"[run_parallel] k={k}: no checkpoint at {ckpt}, skipping")
+    for level in FULL_SCHEDULE:
+        try:
+            ckpt = str(download_hf_artifact(args.hf_repo, args.network, "pytorch", level, token=args.hf_token))
+        except Exception as e:  # noqa: BLE001 -- this level isn't published for this network
+            print(f"[run_parallel] {level}: not on {args.hf_repo} for {args.network} "
+                  f"({type(e).__name__}), skipping")
             continue
-        out_json = out_dir / f"k{k}.json"
-        jobs.append((f"k={k}", k, str(ckpt), out_json))
+        out_json = out_dir / f"{level}.json"
+        jobs.append((f"k={level.removeprefix('c')}", level, ckpt, out_json))
 
     all_jobs = jobs
     if args.force:
@@ -202,18 +200,14 @@ def main():
 
     t_start = time.time()
 
-    def launch(label, num_clusters, ckpt, out_json):
+    def launch(label, level, ckpt, out_json):
         cmd = [sys.executable, str(EVAL_DIR / "worker.py"),
                "--network", args.network, "--checkpoint", ckpt,
-               "--granularity", args.granularity, "--label", label, "--out", str(out_json),
+               "--label", label, "--out", str(out_json),
                "--pred-dir", str(out_dir / f"pred_{label.replace('=', '')}"),
                "--num-threads", str(threads_per_worker)]
-        if num_clusters is not None:
-            cmd += ["--num-clusters", str(num_clusters)]
         if args.device:
             cmd += ["--device", args.device]
-        if args.fused_bn:
-            cmd += ["--fused-bn"]
         # Lowest CPU (nice 19) and I/O (ionice class 3, "idle") scheduling
         # priority -- this batch is meant to soak up otherwise-idle
         # capacity (e.g. while a training run owns the GPU), not compete
@@ -246,7 +240,7 @@ def main():
     # "half the batch OOMs together."
     concurrency = 1
     pending = list(jobs)
-    running = []  # list of (proc, log_f, label, num_clusters, ckpt, out_json)
+    running = []  # list of (proc, log_f, label, level, ckpt, out_json)
     retries_used = {}
     terminally_failed = []
     last_launch = 0.0
@@ -260,20 +254,20 @@ def main():
                 print(f"[run_parallel] holding launches -- gpu={gpu_frac:.0%} "
                       f"ram={ram_frac:.0%} (threshold {args.mem_threshold:.0%})")
                 break
-            label, num_clusters, ckpt, out_json = pending.pop(0)
-            proc, log_f = launch(label, num_clusters, ckpt, out_json)
+            label, level, ckpt, out_json = pending.pop(0)
+            proc, log_f = launch(label, level, ckpt, out_json)
             last_launch = time.time()
             print(f"[run_parallel] started {label} (pid {proc.pid}) -- "
                   f"gpu={gpu_frac:.0%} ram={ram_frac:.0%}, {len(running) + 1}/{concurrency} running "
                   f"(ceiling {concurrency_ceiling})")
-            running.append((proc, log_f, label, num_clusters, ckpt, out_json))
+            running.append((proc, log_f, label, level, ckpt, out_json))
 
         time.sleep(args.poll_seconds)
         still_running = []
-        for proc, log_f, label, num_clusters, ckpt, out_json in running:
+        for proc, log_f, label, level, ckpt, out_json in running:
             ret = proc.poll()
             if ret is None:
-                still_running.append((proc, log_f, label, num_clusters, ckpt, out_json))
+                still_running.append((proc, log_f, label, level, ckpt, out_json))
                 continue
             log_f.close()
             ok = ret == 0 and out_json.exists()
@@ -293,7 +287,7 @@ def main():
                     print(f"[run_parallel] finished {label}: FAILED (exit {ret}) -- "
                           f"requeuing (retry {retries_used[label]}/{args.max_retries}); "
                           f"concurrency now {concurrency}/{concurrency_ceiling}")
-                    pending.append((label, num_clusters, ckpt, out_json))
+                    pending.append((label, level, ckpt, out_json))
         running = still_running
 
     if terminally_failed:
@@ -304,10 +298,11 @@ def main():
     print(f"[run_parallel] all {len(jobs)} queued passes done in {elapsed / 60:.1f} min")
 
     rows = []
-    for label, num_clusters, ckpt, out_json in all_jobs:
+    for label, level, ckpt, out_json in all_jobs:
         if out_json.exists():
             rows.append(json.loads(out_json.read_text()))
         else:
+            num_clusters = None if level == "float32" else int(level.removeprefix("c"))
             rows.append({"label": label, "num_clusters": num_clusters, "error": "no result written"})
 
     # "Dataset part" comparison: the quick-probe columns show the SAME

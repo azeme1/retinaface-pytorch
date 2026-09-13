@@ -50,7 +50,7 @@ if str(_INFER_DIR) not in sys.path:
     sys.path.insert(0, str(_INFER_DIR))
 
 from config import get_config  # noqa: E402
-import widerface_eval as we  # noqa: E402
+import widerface_eval_mp as we  # noqa: E402
 from export_common import download_hf_artifact, load_plain_with_clusters_from_zip  # noqa: E402
 
 DATASET_FOLDER = str(_RETINA_DIR / "data/widerface/val/images/")
@@ -229,8 +229,9 @@ def main():
     p.add_argument("--num-workers", type=int, default=2,
                     help="ThreadPoolExecutor width for widerface_eval.py's per-image loop, pytorch side")
     p.add_argument("--num-threads", type=int, default=4, help="cap on torch's own intra-op CPU thread pool")
-    p.add_argument("--device", default=None, choices=["cuda", "cpu"],
-                    help="force the pytorch side onto this device; None auto-picks cuda if available")
+    p.add_argument("--device", default=None, choices=["cuda", "mps", "cpu"],
+                    help="force the pytorch side onto this device; None auto-picks the best "
+                         "available accelerator (cuda, then mps, then cpu)")
     p.add_argument("--onnx-provider", default=None, choices=["CPU", "CUDA"], help="--format onnx only")
     p.add_argument("--compute-units", default=None,
                     choices=["CPU_ONLY", "CPU_AND_GPU", "CPU_AND_NE", "ALL"], help="--format coreml only")
@@ -248,7 +249,14 @@ def main():
     pred_dir_root.mkdir(parents=True, exist_ok=True)
 
     torch.set_num_threads(args.num_threads)
-    device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device:
+        device = torch.device(args.device)
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     cfg = dict(get_config(args.network))
 
     total_images = len(Path(VAL_LIST).read_text().split())
