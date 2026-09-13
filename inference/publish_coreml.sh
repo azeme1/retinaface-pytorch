@@ -110,7 +110,7 @@ for pair in "${PAIRS[@]}"; do
     # (layers/models/utils, export_common) themselves via their own
     # __file__-anchored sys.path setup -- no separate download step, no
     # path-fixing on this script's side at all.
-    ckpt_url="https://huggingface.co/${REPO}/resolve/main/results/${network}/pytorch/${network}_${level}.zip"
+    ckpt_url="https://huggingface.co/${REPO}/resolve/main/checkpoints/${network}/pytorch/${network}_${level}.zip"
 
     echo "########## ${name}: building corrected CoreML export (Stage 2: backbone + fused priors/decode) ##########" >> "$log_file"
     python3 "${INFER_DIR}/export_coreml.py" --network "$network" \
@@ -180,7 +180,7 @@ from huggingface_hub import HfApi
 api = HfApi(token='$HF_TOKEN')
 api.upload_file(
     path_or_fileobj='$upload_zip',
-    path_in_repo='results/$network/coreml/${network}_${level}.zip',
+    path_in_repo='checkpoints/$network/coreml/${network}_${level}.zip',
     repo_id='$REPO',
     repo_type='model',
     commit_message='Fix CoreML export for $network $level: unique-mode palettization + RGB permute (was silently near-0%% AP)',
@@ -190,7 +190,7 @@ api.upload_file(
     if [ $upload_status -ne 0 ]; then
       echo "${name}: UPLOAD FAILED (exit ${upload_status}) -- see ${log_file}" | tee -a "$SUMMARY"
     else
-      echo "${name}: uploaded -- results/${network}/coreml/${network}_${level}.zip" | tee -a "$SUMMARY"
+      echo "${name}: uploaded -- checkpoints/${network}/coreml/${network}_${level}.zip" | tee -a "$SUMMARY"
     fi
   done
 done
