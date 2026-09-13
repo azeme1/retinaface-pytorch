@@ -46,17 +46,15 @@ from pathlib import Path
 import torch
 
 _RETINA_DIR = Path(__file__).resolve().parent.parent
-_REPO_ROOT = Path("/workspace/home_0/work/llwll")
-
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-from train.refine.quant_utils import quantize_graph, apply_lut_quantization  # noqa: E402
+_INFER_DIR = _RETINA_DIR / "inference"
 
 if str(_RETINA_DIR) not in sys.path:
     sys.path.insert(0, str(_RETINA_DIR))
+if str(_INFER_DIR) not in sys.path:
+    sys.path.insert(0, str(_INFER_DIR))
 from config import get_config  # noqa: E402
-from models import RetinaFace  # noqa: E402
-import widerface_eval as we  # noqa: E402
+import widerface_eval_mp as we  # noqa: E402
+from export_common import load_plain_with_clusters, cluster_count  # noqa: E402
 
 DATASET_FOLDER = str(_RETINA_DIR / "data/widerface/val/images/")
 VAL_LIST = str(_RETINA_DIR / "data/widerface/val/wider_val.txt")
@@ -66,10 +64,14 @@ GT_DIR = str(_RETINA_DIR / "widerface_evaluation/ground_truth")
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--network", required=True)
-    p.add_argument("--checkpoint", required=True)
-    p.add_argument("--num-clusters", type=int, default=None,
-                    help="omit for a plain float32 checkpoint")
-    p.add_argument("--granularity", default="output", choices=["global", "output", "input"])
+    p.add_argument("--checkpoint", required=True,
+                    help="a plain+clusters checkpoint -- EITHER a combined .zip "
+                         "(export_pytorch_batch_hf.py's packing, {state_dict, clusters} in one "
+                         "file) or a bare .pth (plain float32 state_dict, no clusters) -- see "
+                         "inference/export_common.py's load_plain_with_clusters. Never a raw "
+                         "training checkpoint: this repo's inference/eval scripts build only "
+                         "from that plain-weights-plus-cluster-info source, never this "
+                         "project's private training machinery.")
     p.add_argument("--label", required=True, help="row label for the aggregated report, e.g. 'k=16'")
     p.add_argument("--out", required=True, help="path to write this level's result JSON")
     p.add_argument("--pred-dir", required=True)
@@ -84,22 +86,14 @@ def main():
                     help="cap on torch's own intra-op CPU thread pool for THIS process -- "
                          "torch defaults to using every core, which oversubscribes badly when "
                          "many of these run concurrently (see module docstring)")
-    p.add_argument("--device", default=None, choices=["cuda", "cpu"],
-                    help="force a device instead of auto-picking cuda when available -- 'cpu' "
+    p.add_argument("--device", default=None, choices=["cuda", "mps", "cpu"],
+                    help="force a device instead of auto-picking the best available accelerator "
+                         "(cuda, then Apple Silicon mps, then cpu) -- 'cpu' "
                          "lets a full-val batch run entirely off the GPU while something else "
                          "(e.g. a training run) needs it uncontended. Eval wall time here is "
                          "already dominated by CPU-bound NMS/decode, not the forward pass (see "
                          "widerface_eval.py), so CPU-only isn't as large a slowdown as it would "
                          "be for training.")
-    p.add_argument("--fused-bn", action="store_true",
-                    help="Must match how the checkpoint being loaded was quantized (see "
-                         "train_lut_quant.py's build_quantized_model docstring) -- default is the "
-                         "no-fuse apply_lut_quantization scheme (BatchNorm2d stays separate), which "
-                         "is also train_lut_quant.py's default. Pass this only when evaluating a "
-                         "checkpoint that was itself trained with --fused-bn (quantize_graph); loading "
-                         "a fused checkpoint into a no-fuse-reconstructed model (or vice versa) fails "
-                         "with a state_dict key mismatch since fusion removes the separate BatchNorm2d "
-                         "module entirely.")
     args = p.parse_args()
 
     torch.set_num_threads(args.num_threads)
@@ -107,16 +101,13 @@ def main():
     device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = dict(get_config(args.network))
 
-    model = RetinaFace(cfg=cfg).to(device)
-    if args.num_clusters is not None:
-        if args.fused_bn:
-            quantize_graph(model, granularity=args.granularity, num_clusters=args.num_clusters, scheme="lut_kmeans")
-        else:
-            apply_lut_quantization(model, num_clusters=args.num_clusters, granularity=args.granularity)
-        model.to(device)
-    state_dict = torch.load(args.checkpoint, map_location=device, weights_only=True)
-    model.load_state_dict(state_dict)
-    model.eval()
+    # load_plain_with_clusters needs no reconstruction step (no quantize_graph/
+    # apply_lut_quantization) -- the checkpoint's weights are already plain
+    # floats snapped to their trained cluster values, so a stock RetinaFace's
+    # load_state_dict() is all that's needed regardless of num_clusters.
+    model, cluster_info = load_plain_with_clusters(cfg, args.checkpoint)
+    model = model.to(device)
+    num_clusters = cluster_count(cluster_info)
 
     t0 = time.time()
     aps = we.evaluate_model(model, cfg, device, DATASET_FOLDER, VAL_LIST, GT_DIR,
@@ -127,7 +118,7 @@ def main():
 
     result = {
         "label": args.label,
-        "num_clusters": args.num_clusters,
+        "num_clusters": num_clusters,
         "checkpoint": args.checkpoint,
         "aps_full": aps,
         "mean_ap_full": we.mean_ap(aps),

@@ -156,13 +156,31 @@ def select_worth_compressing(mlmodel, num_clusters: int, channel_axis: int, weig
 
 
 def apply_palette_selective(mlmodel, num_clusters: int, channel_axis: int, weight_threshold: int = 1024):
-    """Per-output-channel kmeans palettization, restricted to the ops
+    """Per-output-channel palettization, restricted to the ops
     select_worth_compressing flags as an actual net size win -- everything
-    else is left float32 untouched rather than blanket-compressed."""
+    else is left float32 untouched rather than blanket-compressed.
+
+    mode="unique" (the codebook is read directly off the weights' own
+    existing distinct values), NOT "kmeans" -- these weights are already
+    clustered by this project's own training-time quantization, so a
+    codebook already exists per layer; asking coremltools to re-derive one
+    via kmeans is both redundant AND, confirmed directly (comparing this
+    .mlpackage's real WIDER FACE AP against the un-palettized dense
+    conversion of the SAME clustered checkpoint), broken whenever
+    num_clusters isn't exactly 2**nbits: cluster_count values in {12, 128}
+    (needing nbits=4 nbits=8 but only using 12/128 of the 16/256 available
+    codebook slots) silently collapsed real AP to ~0% -- garbage boxes,
+    near-uniform ~1.0 scores -- while exact-power-of-2 counts (2, 256)
+    matched PyTorch closely. Ie. a coremltools kmeans-palettizer defect
+    with unfilled codebook slots, not anything wrong with this graph.
+    "unique" mode sidesteps it entirely by reading the codebook off the
+    actual distinct values already present instead of re-clustering --
+    confirmed to match PyTorch exactly (0.00% AP diff) across every
+    cluster_info count tested, unlike kmeans. nbits must NOT be passed for
+    "unique" mode -- it's picked up automatically."""
     worth_it = select_worth_compressing(mlmodel, num_clusters, channel_axis, weight_threshold)
-    nbits = _coreml_nbits(num_clusters)
     palettizer = cto.OpPalettizerConfig(
-        mode="kmeans", nbits=nbits, granularity="per_grouped_channel",
+        mode="unique", granularity="per_grouped_channel",
         group_size=1, channel_axis=channel_axis, weight_threshold=weight_threshold,
     )
     config = cto.OptimizationConfig()

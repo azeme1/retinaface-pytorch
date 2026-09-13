@@ -99,31 +99,32 @@ def _decode_landmarks_2d(predictions: torch.Tensor, priors: torch.Tensor, varian
     return center + predictions * variance[0] * scale
 
 
-class RetinaStaticExportWrapper(nn.Module):
-    """Fuses PriorBox as a registered buffer + bakes box/landmark decode
-    into forward() -- computes the prior grid ONCE for a fixed export image
-    size and treats it as a weight, following
-    https://github.com/azeme1/Pytorch_Retinaface_BBFree/blob/master/convert_to_onnx_original.py's
-    RetinaStaticExportWrapper -- instead of recomputing it via
-    PriorBox(...).generate_anchors() inside forward() every call. This
-    keeps ONNX/CoreML/TFLite/TFJS consumers from having to reimplement
-    anchor generation themselves: the exported graph takes a raw
-    (mean-subtracted internally) image and returns absolute-coordinate
-    boxes/scores/landmarks for EVERY prior directly.
+class RetinaBackboneWrapper(nn.Module):
+    """Stage 1 of 2 (see RetinaStaticExportWrapper below for stage 2):
+    normalization + backbone/heads ONLY -- no priors, no decode, no NMS.
+    Takes a raw image tensor ([1,3,H,W], uint8 or float, 0-255 pixel
+    values, in self.input_color_order channel order) and returns raw
+    prior-relative loc/conf/landmarks straight off the model, for EVERY
+    prior, undecoded.
 
-    Confidence filtering and NMS stay OUTSIDE the graph -- same choice this
-    project's external/face_detector/model.py already documents for
-    RetinaFace's OTHER export path (decode-free there; here decode is fused
-    but NMS still isn't): keeps the traced graph static-shaped and friendly
-    to every one of these converters, since a data-dependent
-    variable-length NMS output would fight all of them (ONNX's opset NMS op
-    has spotty runtime support, CoreML's iOS-only, TFLite/TFJS need a
-    custom op) -- every example under examples/ does confidence threshold +
-    NMS itself, in plain numpy/JS, against this same fixed-length output.
+    This is the piece meant to actually run on a requested acceleration
+    device/format -- evaluate/widerface_eval_mp.py uses exactly this class
+    for its own per-image backbone forward pass (on whichever of
+    cuda/mps/cpu was selected), then does its OWN decode/NMS step
+    separately, always on CPU regardless of device (see that module's own
+    docstring for why: decode's exp()/prior-scaling math has confirmed
+    accelerator-specific correctness bugs -- box_utils.py's _MAX_EXP_INPUT
+    comment, inference/export_coreml.py's apply_palette_selective -- not
+    something to keep chasing per-accelerator). RetinaStaticExportWrapper
+    is the OTHER consumer: it composes this and fuses decode back in, for
+    inference/'s own export scripts, where a single self-contained graph
+    (backbone AND decode together) running entirely on the target device/
+    format is the actual deployment requirement -- an exported ONNX/CoreML/
+    TFLite artifact can't fall back to a separate CPU-side decode step the
+    way this project's own eval pipeline can.
     """
 
-    def __init__(self, model: nn.Module, cfg: dict, image_size: tuple[int, int],
-                 priors_dtype: torch.dtype = torch.float32, input_color_order: str = "bgr"):
+    def __init__(self, model: nn.Module, input_color_order: str = "bgr"):
         """input_color_order describes what channel order the INCOMING tensor
         is in, independent of how this checkpoint's weights were trained
         (always BGR in this repo, cv2's convention -- see rgb_mean below).
@@ -138,8 +139,62 @@ class RetinaStaticExportWrapper(nn.Module):
         if input_color_order not in ("bgr", "rgb"):
             raise ValueError(f"input_color_order must be 'bgr' or 'rgb', got {input_color_order!r}")
         self.model = model
-        self.variance = cfg["variance"]
         self.input_color_order = input_color_order
+        rgb_mean = torch.tensor([104.0, 117.0, 123.0]).view(1, 3, 1, 1)  # bgr order, matches train.py
+        self.register_buffer("rgb_mean", rgb_mean)
+
+    def forward(self, x: torch.Tensor):
+        # x: [1, 3, H, W], raw uint8 (or float) pixel values (0-255) in
+        # self.input_color_order channel order -- normalized here so
+        # callers (and any exported graph built on top, see
+        # RetinaStaticExportWrapper) hand in a raw image, never
+        # pre-normalized pixels.
+        x = x.float()
+        if self.input_color_order == "rgb":
+            x = x[:, [2, 1, 0], :, :]  # -> bgr, matching training (see __init__)
+        x = x - self.rgb_mean
+        loc, conf, landmarks = self.model(x)
+        # [0] instead of .squeeze(0): mathematically identical for this
+        # guaranteed-batch-size-1 export, but pnnx's ncnn backend (see
+        # export_ncnn.py) silently mis-lowers squeeze(0) on a batch axis
+        # ("squeeze batch dim 0 is not supported yet!", then produces
+        # wrong numbers rather than erroring) -- confirmed indexing avoids
+        # it, and every other backend traces it identically either way.
+        return loc[0], conf[0], landmarks[0]
+
+
+class RetinaStaticExportWrapper(nn.Module):
+    """Stage 2 of 2: composes RetinaBackboneWrapper (stage 1, above) and
+    fuses PriorBox as a registered buffer + bakes box/landmark decode back
+    into forward() on top of it -- computes the prior grid ONCE for a
+    fixed export image size and treats it as a weight, following
+    https://github.com/azeme1/Pytorch_Retinaface_BBFree/blob/master/convert_to_onnx_original.py's
+    RetinaStaticExportWrapper -- instead of recomputing it via
+    PriorBox(...).generate_anchors() inside forward() every call. This
+    keeps ONNX/CoreML/TFLite/TFJS consumers from having to reimplement
+    anchor generation themselves: the exported graph takes a raw
+    (mean-subtracted internally) image and returns absolute-coordinate
+    boxes/scores/landmarks for EVERY prior directly -- backbone AND decode
+    together, all running on whatever device/format the export targets
+    (see RetinaBackboneWrapper's own docstring for why that's a DIFFERENT
+    tradeoff than evaluate/'s own always-CPU-decode pipeline).
+
+    Confidence filtering and NMS stay OUTSIDE the graph -- same choice this
+    project's external/face_detector/model.py already documents for
+    RetinaFace's OTHER export path (decode-free there; here decode is fused
+    but NMS still isn't): keeps the traced graph static-shaped and friendly
+    to every one of these converters, since a data-dependent
+    variable-length NMS output would fight all of them (ONNX's opset NMS op
+    has spotty runtime support, CoreML's iOS-only, TFLite/TFJS need a
+    custom op) -- every example under examples/ does confidence threshold +
+    NMS itself, in plain numpy/JS, against this same fixed-length output.
+    """
+
+    def __init__(self, model: nn.Module, cfg: dict, image_size: tuple[int, int],
+                 priors_dtype: torch.dtype = torch.float32, input_color_order: str = "bgr"):
+        super().__init__()
+        self.backbone = RetinaBackboneWrapper(model, input_color_order=input_color_order)
+        self.variance = cfg["variance"]
 
         priors = PriorBox(cfg, image_size=image_size).generate_anchors()  # (num_priors, 4), normalized
         # Fused like a weight: computed ONCE here for this fixed export
@@ -151,8 +206,6 @@ class RetinaStaticExportWrapper(nn.Module):
         # those converters otherwise insert extra fp16<->fp32 cast ops
         # around a lone half-precision constant.
         self.register_buffer("priors", priors.to(priors_dtype))
-        rgb_mean = torch.tensor([104.0, 117.0, 123.0]).view(1, 3, 1, 1)  # bgr order, matches train.py
-        self.register_buffer("rgb_mean", rgb_mean)
 
         # Plain Python constants, not derived from x.shape inside forward():
         # this is a FIXED-size static export, so the height/width used to
@@ -185,21 +238,7 @@ class RetinaStaticExportWrapper(nn.Module):
         rescale_to_original for the equivalent standalone helper every
         exported-format consumer still needs, since THEY have no such
         option)."""
-        # x: [1, 3, H, W], raw float pixel values (0-255) in
-        # self.input_color_order channel order -- normalized here so the
-        # exported model is fully self-contained (raw image in), same
-        # convention as this project's face_detector/model.py.
-        if self.input_color_order == "rgb":
-            x = x[:, [2, 1, 0], :, :]  # -> bgr, matching training (see __init__)
-        x = x - self.rgb_mean
-        loc, conf, landmarks = self.model(x)
-        # [0] instead of .squeeze(0): mathematically identical for this
-        # guaranteed-batch-size-1 export, but pnnx's ncnn backend (see
-        # export_ncnn.py) silently mis-lowers squeeze(0) on a batch axis
-        # ("squeeze batch dim 0 is not supported yet!", then produces
-        # wrong numbers rather than erroring) -- confirmed indexing avoids
-        # it, and every other backend traces it identically either way.
-        loc, conf, landmarks = loc[0], conf[0], landmarks[0]
+        loc, conf, landmarks = self.backbone(x)
 
         priors = self.priors.float()  # upcast needed when priors_dtype is float16 (CoreML export)
         bbox_scale, landmark_scale = self.bbox_scale, self.landmark_scale
