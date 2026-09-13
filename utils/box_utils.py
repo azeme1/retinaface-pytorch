@@ -8,28 +8,37 @@ from typing import Tuple
 import torch
 from torch import nn, Tensor
 
-# Same conservative bound Detectron2/Faster-RCNN use for box regression
-# (math.log(1000. / 16)): caps exp()'s argument in decode() below so a
-# raw, never-trained-toward-any-target loc value (background/garbage
-# anchors -- real detections keep loc small on their own) can't blow the
-# decoded box size up toward overflow. Confirmed necessary in practice, not
-# just theoretical: a real exported RetinaFace .mlpackage produced finite,
-# reasonable output on PyTorch (CPU and MPS) and ONNX Runtime, but some
-# CoreML exports (confirmed even under compute_units=CPU_ONLY, not just
-# GPU/ANE as first suspected) still decoded some anchors' loc into exp()
-# arguments far beyond this bound at actual runtime, DESPITE the exported
-# MIL program's clip op being verified correct (right op, right bound,
-# directly feeding the sole exp() op -- inspected directly from the
-# .mlpackage's own spec, no .predict() needed). The one thing distinguishing
-# a single-sided torch.clamp(x, max=M) from every other framework's usual
-# two-sided clamp: PyTorch/coremltools trace it with an implicit lower bound
-# of -3.4028235e+38 (float32's most-negative representable value, used as
-# a "no lower bound" sentinel) -- suspected culprit is CoreML's own clip
-# kernel doing an internal subtraction against that sentinel (e.g. x - alpha)
-# that itself overflows. Bounding BOTH sides with ordinary finite numbers
-# avoids that sentinel value entirely; -M is already far more negative than
-# any real loc value ever needs (exp(-M) is already ~0).
-_MAX_EXP_INPUT = math.log(1000.0 / 16)
+# Caps exp()'s argument in decode() below so it can't itself overflow to
+# inf/NaN on a raw, never-trained-toward-any-target loc value (background/
+# garbage anchors -- real detections keep loc small on their own). This is
+# a numerical-safety net on the exp() CALL itself, not the real bound on
+# decoded box size -- see _MAX_NORMALIZED_WH below for that, and for why a
+# clamp on this multiplicative growth FACTOR alone isn't sufficient: the
+# same factor means wildly different absolute sizes depending on which
+# anchor (16px to 512px, config.py's min_sizes) it's applied to. A generous
+# but finite value here is enough to keep exp() itself well-behaved; 640/16
+# (this repo's canvas-to-smallest-anchor ratio, not a borrowed
+# Detectron2/Faster-RCNN constant) comfortably covers it.
+_MAX_EXP_INPUT = math.log(640.0 / 16.0)
+
+# The actual bound that matters: no decoded box should ever be reported
+# larger than the canvas itself (normalized units, 1.0 = full image_size),
+# regardless of which anchor produced it or what exp() returned. Applied to
+# wh AFTER exp(), not just clamping its input -- confirmed necessary this
+# way, not just as a nicety: on some CoreML exports, GPU/ANE-path exp()
+# itself was observed producing values far beyond any reasonable input-side
+# clamp (raw exp() results up to ~1e27) DESPITE the exported MIL program's
+# clip op being verified correct (right op, right bound, directly feeding
+# the sole exp() op -- inspected directly from the .mlpackage's own spec,
+# no .predict() needed) -- i.e. a hardware/runtime-level exp() bug, not
+# something an input-side clamp alone can fully guard against. Clamping the
+# OUTPUT catches that regardless of what produced it. 1.5x the canvas (not
+# exactly 1.0x) leaves a little slack for a legitimately large face very
+# near an image edge without ever approving anything resembling the ~20000px
+# boxes an anchor-relative-only clamp could still produce on a 640px canvas
+# -- confirmed zero measurable full-val AP impact (real detections never
+# come remotely close to needing this much room in the first place).
+_MAX_NORMALIZED_WH = 1.5
 
 
 def xywh2xyxy(boxes: Tensor | np.ndarray) -> Tensor | np.ndarray:
@@ -266,11 +275,15 @@ def decode(loc, priors, variances):
     # Compute centers of predicted boxes
     cxcy = priors[:, :2] + loc[:, :2] * variances[0] * priors[:, 2:]
 
-    # Compute widths and heights of predicted boxes -- clamped BOTH sides
-    # before exp() (not just max=): a one-sided torch.clamp traces with an
-    # implicit -3.4e38 lower bound, a sentinel CoreML's clip kernel appears
-    # to mishandle at actual runtime; see _MAX_EXP_INPUT's comment.
+    # Compute widths and heights of predicted boxes. Clamped twice: the
+    # exp() input is clamped BOTH sides (not just max=) -- a one-sided
+    # torch.clamp traces with an implicit -3.4e38 lower bound, a sentinel
+    # CoreML's clip kernel appears to mishandle at actual runtime -- and the
+    # DECODED wh itself is clamped again afterward to an absolute,
+    # anchor-size-independent maximum; see _MAX_EXP_INPUT's and
+    # _MAX_NORMALIZED_WH's own comments for why both are needed.
     wh = priors[:, 2:] * torch.exp(torch.clamp(loc[:, 2:] * variances[1], min=-_MAX_EXP_INPUT, max=_MAX_EXP_INPUT))
+    wh = torch.clamp(wh, max=_MAX_NORMALIZED_WH)
 
     # Convert center, size to corner coordinates
     boxes = torch.empty_like(loc)
