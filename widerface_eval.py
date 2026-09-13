@@ -30,7 +30,7 @@ address space). Threads still contend on the GIL for the pure-Python NMS
 loop, but cv2 decode/resize and the CUDA calls release it, so there's real
 overlap available. Each chunk logs a memory snapshot (see _memory_snapshot)
 so a leak across a long unsampled full-val pass -- or across several of
-these processes running concurrently, as run_full_eval_parallel.py does --
+these processes running concurrently, as evaluate/run_parallel.py does --
 shows up as a climbing curve instead of a silent OOM.
 """
 

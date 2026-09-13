@@ -44,8 +44,8 @@ Usage:
     # or download either artifact from an arbitrary URL directly (e.g. a
     # private repo's own resolve/main/... link, needs --hf-token or $HF_TOKEN):
     python inference/export_check.py --format onnx --network mobilenetv1 --image-size 640 \\
-        --checkpoint-url https://huggingface.co/azemel/retinaface-xs/resolve/main/results/mobilenetv1/pytorch/mobilenetv1_c12.zip \\
-        --artifact-url https://huggingface.co/azemel/retinaface-xs/resolve/main/results/mobilenetv1/onnx/mobilenetv1_c12.zip
+        --checkpoint-url https://huggingface.co/azemel/retinaface-xs/resolve/main/checkpoints/mobilenetv1/pytorch/mobilenetv1_c12.zip \\
+        --artifact-url https://huggingface.co/azemel/retinaface-xs/resolve/main/checkpoints/mobilenetv1/onnx/mobilenetv1_c12.zip
 """
 from __future__ import annotations
 
@@ -288,7 +288,7 @@ def main():
                                                      "from instead of local files -- requires --hf-level")
     p.add_argument("--hf-level", default=None, help="e.g. 'c7' or 'float32' (see "
                                                       "export_pytorch_batch_hf.py's tag convention) -- selects "
-                                                      "results/<network>/{pytorch,<format>}/<network>_<level>.zip")
+                                                      "checkpoints/<network>/{pytorch,<format>}/<network>_<level>.zip")
     p.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"),
                     help="bearer token for a private repo -- defaults to the HF_TOKEN system variable, used for "
                          "--hf-repo as well as --checkpoint-url/--artifact-url")

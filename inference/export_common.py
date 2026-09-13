@@ -302,12 +302,12 @@ def _hf_token(explicit: str | None = None) -> str | None:
 def download_hf_artifact(repo_id: str, network: str, fmt: str, level: str, token: str | None = None) -> Path:
     """Downloads one exported artifact already published to the given HF
     repo, under the layout this session's own HF pushes use:
-    results/<network>/<fmt>/<network>_<level>.zip -- fmt is "pytorch",
+    checkpoints/<network>/<fmt>/<network>_<level>.zip -- fmt is "pytorch",
     "onnx", or "coreml"; level is e.g. "c7" or "float32" (a cluster count
     or "float32", never any hint of the training method that produced it).
     Returns the local cached file path (huggingface_hub's own cache, so a
     second call for the same file is instant, no re-download)."""
-    path_in_repo = f"results/{network}/{fmt}/{network}_{level}.zip"
+    path_in_repo = f"checkpoints/{network}/{fmt}/{network}_{level}.zip"
     return Path(hf_hub_download(repo_id=repo_id, repo_type="model", filename=path_in_repo,
                                  token=_hf_token(token)))
 

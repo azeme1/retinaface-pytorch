@@ -53,7 +53,7 @@ Usage:
     python inference/export_coreml.py --network mobilenetv1_0.25 \\
         --checkpoint pytorch_export/mobilenetv1_0.25_float32.pth   # bare .pth: plain float32, no palettization
     python inference/export_coreml.py --network mobilenetv1 --image-size 640 \\
-        --checkpoint-url https://huggingface.co/azemel/retinaface-xs/resolve/main/results/mobilenetv1/pytorch/mobilenetv1_c12.zip
+        --checkpoint-url https://huggingface.co/azemel/retinaface-xs/resolve/main/checkpoints/mobilenetv1/pytorch/mobilenetv1_c12.zip
 """
 
 import argparse
@@ -182,7 +182,7 @@ def main():
                          "with --checkpoint-url.")
     p.add_argument("--checkpoint-url", default=None,
                     help="same as --checkpoint, but downloaded first from this URL, e.g. "
-                         "https://huggingface.co/<repo>/resolve/main/results/<network>/pytorch/"
+                         "https://huggingface.co/<repo>/resolve/main/checkpoints/<network>/pytorch/"
                          "<network>_<level>.zip. Mutually exclusive with --checkpoint.")
     p.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"),
                     help="bearer token for --checkpoint-url against a private repo -- defaults to the "
