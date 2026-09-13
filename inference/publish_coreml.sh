@@ -48,6 +48,11 @@
 # (evaluate/run_parallel.py's own --force-less default).
 set -uo pipefail
 
+# Resolved from the script's own location, not the caller's cwd -- run
+# this from the repo root, from inference/, or anywhere else and it lands
+# in the same place either way.
+INFER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 : "${HF_TOKEN:?Set HF_TOKEN to a token with WRITE access to azemel/retinaface-xs}"
 
 if [ $# -lt 1 ] || [ -z "$1" ]; then
@@ -65,9 +70,9 @@ esac
 REPO="azemel/retinaface-xs"
 IMAGE_SIZE=640
 MATCH_TOLERANCE_PCT="${2:-0.5}"
-LOG_DIR="./coreml_publish_logs"
-BUILD_DIR="./coreml_publish_build"
-SUMMARY="./coreml_publish_summary_${1}.log"
+LOG_DIR="${INFER_DIR}/coreml_publish_logs"
+BUILD_DIR="${INFER_DIR}/coreml_publish_build"
+SUMMARY="${INFER_DIR}/coreml_publish_summary_${1}.log"
 
 mkdir -p "$LOG_DIR" "$BUILD_DIR"
 : > "$SUMMARY"
@@ -98,21 +103,18 @@ for pair in "${PAIRS[@]}"; do
     fi
 
     echo "=== ${name} (${1}) -> ${log_file} ==="
-    {
-      echo "########## ${name} (${1}): downloading pytorch checkpoint ##########"
-    } > "$log_file"
+    : > "$log_file"
 
-    ckpt=$(python3 -c "
-from export_common import download_hf_artifact
-print(download_hf_artifact('$REPO', '$network', 'pytorch', '$level', token='$HF_TOKEN'))
-" 2>>"$log_file")
-    if [ -z "$ckpt" ]; then
-      echo "${name}: FAILED -- could not download pytorch checkpoint, see ${log_file}" | tee -a "$SUMMARY"
-      continue
-    fi
+    # export_coreml.py/export_check.py both take --checkpoint-url directly
+    # (see either script's own docstring) and resolve everything else
+    # (layers/models/utils, export_common) themselves via their own
+    # __file__-anchored sys.path setup -- no separate download step, no
+    # path-fixing on this script's side at all.
+    ckpt_url="https://huggingface.co/${REPO}/resolve/main/results/${network}/pytorch/${network}_${level}.zip"
 
     echo "########## ${name}: building corrected CoreML export (Stage 2: backbone + fused priors/decode) ##########" >> "$log_file"
-    python3 export_coreml.py --network "$network" --checkpoint "$ckpt" \
+    python3 "${INFER_DIR}/export_coreml.py" --network "$network" \
+      --checkpoint-url "$ckpt_url" --hf-token "$HF_TOKEN" \
       --image-size "$IMAGE_SIZE" --out-dir "$mlpackage_dir" >> "$log_file" 2>&1
     build_status=$?
     mlpackage="${mlpackage_dir}/${network}_${level}.mlpackage"
@@ -122,8 +124,8 @@ print(download_hf_artifact('$REPO', '$network', 'pytorch', '$level', token='$HF_
     fi
 
     echo "########## ${name}: full 3226-image WIDER FACE validation (pytorch vs NEW coreml) ##########" >> "$log_file"
-    python3 export_check.py --format coreml --network "$network" \
-      --checkpoint "$ckpt" --artifact "$mlpackage" \
+    python3 "${INFER_DIR}/export_check.py" --format coreml --network "$network" \
+      --checkpoint-url "$ckpt_url" --hf-token "$HF_TOKEN" --artifact "$mlpackage" \
       --input-color-order rgb --compute-units "$COMPUTE_UNITS" \
       --image-size "$IMAGE_SIZE" >> "$log_file" 2>&1
     check_status=$?
