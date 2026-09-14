@@ -35,6 +35,11 @@ class WiderFaceDetection(data.Dataset):
 
     def __getitem__(self, index):
         image = cv2.imread(self.image_paths[index])
+        if image is None:
+            import random
+            print(f"[WiderFaceDetection] cv2.imread returned None for {self.image_paths[index]} "
+                  f"-- skipping, using a different random sample instead")
+            return self.__getitem__(random.randrange(len(self)))
         height, width, _ = image.shape
 
         labels = self.words[index]
