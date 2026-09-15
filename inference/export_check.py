@@ -463,7 +463,7 @@ def main():
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(process, name): name for name in sample}
-        for fut in tqdm.tqdm(as_completed(futures), total=len(futures), desc=f"PyTorch vs {fmt.upper()}"):
+        for fut in tqdm.tqdm(as_completed(futures), total=len(futures), desc=f"PyTorch vs {fmt.upper()}", mininterval=5):
             parity = fut.result()
             if parity is None:
                 continue
