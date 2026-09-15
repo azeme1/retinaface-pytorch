@@ -65,7 +65,7 @@ def path_size_mb(path: str) -> float:
 
 
 def export_onnx(network: str, checkpoint: str,
-                 image_size: int, out_dir: str, opset: int = 17, simplify: bool = True,
+                 image_size: int, out_dir: str, opset: int = 18, simplify: bool = True,
                  palettize: bool = True) -> Path:
     cfg = dict(get_config(network))
     model, cluster_info = load_plain_with_clusters(cfg, checkpoint)
@@ -92,7 +92,11 @@ def export_onnx(network: str, checkpoint: str,
             # an onnxsim topological-sort failure on the graph it produced
             # (a duplicated weight name it introduced, "...weight_1", with no
             # producing node). The older TorchScript-based exporter emits a
-            # clean graph for this model with neither problem.
+            # clean graph for this model with neither problem -- confirmed
+            # that ALSO holds at opset 18 (this function's default, bumped
+            # from 17 so onnx_palettize.py's 4-bit nibble-packed indices can
+            # use BitwiseAnd, opset 18+): bit-exact identical output vs. the
+            # opset-17 export on every checkpoint tested.
             dynamo=False,
         )
 
@@ -141,7 +145,7 @@ def main():
                     help="bearer token for --checkpoint-url against a private repo -- defaults to the "
                          "HF_TOKEN system variable")
     p.add_argument("--image-size", type=int, default=640)
-    p.add_argument("--opset", type=int, default=17)
+    p.add_argument("--opset", type=int, default=18)
     p.add_argument("--out-dir", default="onnx_export")
     p.add_argument("--no-simplify", action="store_true", help="skip the onnxsim cleanup pass")
     p.add_argument("--no-palettize", action="store_true",
