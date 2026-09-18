@@ -123,44 +123,121 @@ def _coreml_nbits(num_clusters: int) -> int:
     raise ValueError(f"num_clusters={num_clusters} needs more than 8 bits, unsupported by CoreML palettization")
 
 
-def select_worth_compressing(mlmodel, num_clusters: int, channel_axis: int, weight_threshold: int = 1024) -> list[str]:
-    """Names of ops where per-output-channel palettization is a genuine
-    on-disk size win, vs. blanket-palettizing everything weight_threshold
-    or larger.
+# Index widths coremltools can palettize to (OpPalettizerConfig._VALID_NBITS,
+# see _COREML_SUPPORTED_NBITS above) -- whole bits only: there is no 5 or 7, so
+# a cluster count that needs 5 or 7 bits is rounded UP (17..32 clusters -> a
+# 6-bit table, 65..256 -> 8-bit).
+#
+# Which of those widths the CoreML GPU path (compute_units CPU_AND_GPU, "MPS"
+# on macOS) executes CORRECTLY for a per-output-channel-palettized DENSE
+# SPATIAL conv -- measured on a 64->256 3x3 conv (160x160 input) for 14
+# cluster counts, relative error vs PyTorch (CPU_ONLY is exact for every
+# width):
+#     1-bit ~3e-7   OK        2-bit 0.49-0.52  WRONG
+#     3-bit ~4e-7   OK        4-bit 0.45-0.59  WRONG
+#     6-bit ~5e-7   OK        8-bit 0.17-0.22  WRONG
+# 1x1 (pointwise) and depthwise convs are correct at every width tested.
+# So a dense spatial conv is only ever given a 1-, 3- or 6-bit table.
+_GPU_SAFE_SPATIAL_NBITS = (1, 3, 6)
 
-    Needed because a palettized tensor doesn't just shrink -- it trades its
-    float32 storage for TWO things: a packed index per element (ceil(log2(
-    num_clusters)) bits) PLUS one float32 table per output channel (channel_axis
-    group) of num_clusters entries, wrapped in its own constant-lookup
-    op. For a tensor with few elements per channel (e.g. a (4,64,1,1) 1x1
-    conv head: 64 elements total, 64 channels), the per-channel table cost can
-    exceed the raw float32 weights it's replacing -- confirmed exactly this
-    on mobilenetv1_0.25 k=16 (blanket palettization measured 0.43x: net
-    GROWTH, not compression). Filtering to only ops that pass this estimate
-    is what actually produces a smaller .mlpackage.
+
+def is_dense_spatial_conv_weight(shape) -> bool:
+    """A conv weight (ndim 4) with a kernel bigger than 1x1 and more than one
+    input channel per group -- i.e. NOT pointwise (k=1) and NOT depthwise
+    (weight shape (C, 1, k, k))."""
+    return len(shape) == 4 and shape[1] > 1 and (shape[2] > 1 or shape[3] > 1)
+
+
+def gpu_safe_nbits(num_clusters: int) -> int | None:
+    """Smallest GPU-safe index width (_GPU_SAFE_SPATIAL_NBITS) that can hold
+    num_clusters distinct values -- e.g. 3-4 clusters (would be a wrong 2-bit
+    table) -> 3 bits, 9-16 clusters (wrong 4-bit) -> 6 bits. None when even
+    6 bits are not enough (> 64 clusters, which would need the wrong 8-bit
+    table): such a layer has to stay dense float32."""
+    needed = max(1, math.ceil(math.log2(num_clusters)))
+    for nbits in _GPU_SAFE_SPATIAL_NBITS:
+        if nbits >= needed:
+            return nbits
+    return None
+
+
+def _padded_lut_function(nbits: int):
+    """lut_function for OpPalettizerConfig(mode="custom"): the channel's own
+    distinct values as the table, zero-padded up to 2**nbits entries, so the
+    exported width is exactly nbits even when fewer values are needed (what
+    "unique" mode can't do -- it always picks the smallest width, which is
+    the wrong one on the GPU for 2/4-bit)."""
+    import numpy as np
+
+    def lut_function(weight):
+        values = np.asarray(weight).reshape(-1)
+        distinct = np.unique(values)
+        assert len(distinct) <= 2 ** nbits, f"{len(distinct)} distinct values do not fit {nbits} bits"
+        lut = np.zeros(2 ** nbits, dtype=values.dtype)
+        lut[:len(distinct)] = distinct
+        return lut.tolist(), np.searchsorted(distinct, values).tolist()
+
+    return lut_function
+
+
+def plan_palettization(mlmodel, num_clusters: int, channel_axis: int, weight_threshold: int = 1024) -> dict:
+    """{op name: forced nbits or None} for every weight worth palettizing --
+    None means "unique" mode picks the width itself (fine for everything
+    except dense spatial convs, see _GPU_SAFE_SPATIAL_NBITS); an int forces
+    exactly that width via a padded custom table.
+
+    Per-output-channel palettization is only kept where it is a genuine
+    on-disk size win, vs. blanket-palettizing everything weight_threshold or
+    larger: a palettized tensor doesn't just shrink -- it trades its float32
+    storage for a packed index per element PLUS one float32 table per output
+    channel (channel_axis group), wrapped in its own constant-lookup op. For
+    a tensor with few elements per channel (e.g. a (4,64,1,1) 1x1 conv head:
+    64 elements total, 64 channels), the table cost can exceed the raw
+    float32 weights it's replacing -- confirmed exactly this on
+    mobilenetv1_0.25 k=16 (blanket palettization measured 0.43x: net
+    GROWTH, not compression).
+
+    A dense spatial conv is only palettized when a GPU-safe width exists for
+    it (gpu_safe_nbits) and every channel really has <= 2**width distinct
+    values (a checkpoint that was not clustered per output channel stays
+    dense rather than tripping the padded table's assertion).
     """
+    import numpy as np
+
     metadata = cto.get_weights_metadata(mlmodel, weight_threshold=weight_threshold)
-    index_bits = _coreml_nbits(num_clusters)
-    worth_it = []
+    plan = {}
     for name, meta in metadata.items():
         shape = meta.val.shape
         if len(shape) <= channel_axis:
             continue
+        forced = None
+        index_bits, table_entries = _coreml_nbits(num_clusters), num_clusters
+        if is_dense_spatial_conv_weight(shape):
+            forced = gpu_safe_nbits(num_clusters)
+            if forced is None:
+                continue
+            per_channel = np.moveaxis(meta.val, channel_axis, 0).reshape(shape[channel_axis], -1)
+            if any(len(np.unique(row)) > 2 ** forced for row in per_channel):
+                continue
+            index_bits, table_entries = forced, 2 ** forced
         n_elements = meta.val.size
-        n_groups = shape[channel_axis]
-        compressed_bytes = math.ceil(n_elements * index_bits / 8) + n_groups * num_clusters * 4
-        float32_bytes = n_elements * 4
-        if compressed_bytes < float32_bytes:
-            worth_it.append(name)
-    return worth_it
+        compressed_bytes = math.ceil(n_elements * index_bits / 8) + shape[channel_axis] * table_entries * 4
+        if compressed_bytes < n_elements * 4:
+            plan[name] = forced
+    return plan
+
+
+def select_worth_compressing(mlmodel, num_clusters: int, channel_axis: int, weight_threshold: int = 1024) -> list[str]:
+    """Names of the ops plan_palettization decides to palettize."""
+    return list(plan_palettization(mlmodel, num_clusters, channel_axis, weight_threshold))
 
 
 def apply_palette_selective(mlmodel, num_clusters: int, channel_axis: int, weight_threshold: int = 1024):
     """Per-output-channel palettization, restricted to the ops
-    select_worth_compressing flags as an actual net size win -- everything
-    else is left float32 untouched rather than blanket-compressed.
+    plan_palettization flags as an actual net size win -- everything else is
+    left float32 untouched rather than blanket-compressed.
 
-    mode="unique" (the codebook is read directly off the weights' own
+    "unique" mode (the codebook is read directly off the weights' own
     existing distinct values), NOT "kmeans" -- these weights are already
     clustered by this project's own training-time quantization, so a
     codebook already exists per layer; asking coremltools to re-derive one
@@ -177,16 +254,24 @@ def apply_palette_selective(mlmodel, num_clusters: int, channel_axis: int, weigh
     actual distinct values already present instead of re-clustering --
     confirmed to match PyTorch exactly (0.00% AP diff) across every
     cluster_info count tested, unlike kmeans. nbits must NOT be passed for
-    "unique" mode -- it's picked up automatically."""
-    worth_it = select_worth_compressing(mlmodel, num_clusters, channel_axis, weight_threshold)
-    palettizer = cto.OpPalettizerConfig(
-        mode="unique", granularity="per_grouped_channel",
-        group_size=1, channel_axis=channel_axis, weight_threshold=weight_threshold,
-    )
+    "unique" mode -- it's picked up automatically.
+
+    Dense spatial convs are the one exception: "unique" would pick a 2-, 4-
+    or 8-bit table for them, all wrong on the CoreML GPU path (see
+    _GPU_SAFE_SPATIAL_NBITS), so those get an explicit GPU-safe width via a
+    padded custom table instead (or stay dense if none fits)."""
+    plan = plan_palettization(mlmodel, num_clusters, channel_axis, weight_threshold)
     config = cto.OptimizationConfig()
-    for name in worth_it:
-        config.set_op_name(name, palettizer)
-    return cto.palettize_weights(mlmodel, config), worth_it
+    for name, forced in plan.items():
+        common = dict(granularity="per_grouped_channel", group_size=1,
+                      channel_axis=channel_axis, weight_threshold=weight_threshold)
+        if forced is None:
+            config.set_op_name(name, cto.OpPalettizerConfig(mode="unique", **common))
+        else:
+            config.set_op_name(name, cto.OpPalettizerConfig(
+                mode="custom", lut_function=_padded_lut_function(forced), **common))
+    return cto.palettize_weights(mlmodel, config), list(plan)
+
 
 
 def main():

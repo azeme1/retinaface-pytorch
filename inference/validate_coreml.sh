@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs export_check.py --format coreml (PyTorch vs CoreML, real WIDER FACE AP)
 # for every CoreML export currently staged on the Hugging Face repo, for every
-# backbone except resnet50 (still training). macOS only -- CoreML's
+# backbone. macOS only -- CoreML's
 # .predict() needs libcoremlpython, which doesn't exist on Linux.
 #
 # Which backend to run every checkpoint on is a REQUIRED first argument --
@@ -22,7 +22,7 @@
 # Usage:
 #   pip install coremltools opencv-python numpy torch tqdm pillow
 #   export HF_TOKEN=hf_...          # required -- azemel/retinaface-xs is private
-#   ./validate_coreml.sh CPU|MPS [n_images]
+#   [ONLY_NETWORKS="resnet18 resnet34"] ./validate_coreml.sh CPU|MPS [n_images]
 #
 # n_images (optional, default: full WIDER FACE val set, 3226 images -- the
 # only way to get an AP comparable across runs; pass a smaller number, e.g.
@@ -75,11 +75,15 @@ declare -a PAIRS=(
   "mobilenetv2:c2 c5 c64 c256"
   "resnet18:c2 c5 c32 c256"
   "resnet34:c2 c4 c128 c256"
+  "resnet50:c2 c4 c128 c256"
 )
 
 for pair in "${PAIRS[@]}"; do
   network="${pair%%:*}"
   levels="${pair#*:}"
+  if [ -n "${ONLY_NETWORKS:-}" ] && [[ " ${ONLY_NETWORKS} " != *" ${network} "* ]]; then
+    continue
+  fi
   for level in $levels; do
     name="${network}_${level}"
     log_file="${LOG_DIR}/${name}_${1}.log"
