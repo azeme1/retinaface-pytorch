@@ -13,7 +13,7 @@ number to compare against results/<network>/full_eval_parallel/*.json).
 One script covering all three formats (replaces the former separate
 export_onnx_check.py / export_coreml_check.py, which were ~90% identical --
 only the "how do I load this artifact and run one image through it" part
-ever differed): pass --format {onnx,coreml,tflite}.
+ever differed): pass --format {onnx,coreml,tflite,tfjs}.
 
 Running the CoreML side needs coremltools' native runtime
 (libcoremlpython), which only exists on macOS -- on any other platform this
@@ -87,7 +87,7 @@ GT_DIR = str(_RETINA_DIR / "widerface_evaluation/ground_truth")
 # export_onnx.py/export_coreml.py/export_tflite.py's own packaging
 # convention (never the network/cluster name, so nothing about which
 # checkpoint produced it leaks from the archive's own contents).
-ARTIFACT_NAME = {"onnx": "model.onnx", "coreml": "model.mlpackage", "tflite": "model.tflite"}
+ARTIFACT_NAME = {"onnx": "model.onnx", "coreml": "model.mlpackage", "tflite": "model.tflite", "tfjs": "model.json"}
 # Whether calling this format's own inference entry point concurrently from
 # multiple threads on ONE loaded instance is safe. ONNX Runtime sessions are
 # documented thread-safe for .run(). CoreML's MLModel.predict() is NOT --
@@ -96,7 +96,9 @@ ARTIFACT_NAME = {"onnx": "model.onnx", "coreml": "model.mlpackage", "tflite": "m
 # Interpreter is documented as NOT safe for concurrent invoke() either, same
 # treatment. Image decode + the PyTorch forward pass still run concurrently
 # across threads regardless -- only the native call itself is serialized.
-NEEDS_LOCK = {"onnx": False, "coreml": True, "tflite": True}
+# TF.js runs in ONE long-lived Node worker process (tfjs_worker/worker.js)
+# talking over a single stdin/stdout pipe pair -- requests must be serialized.
+NEEDS_LOCK = {"onnx": False, "coreml": True, "tflite": True, "tfjs": True}
 
 
 def preprocess(img_bgr: np.ndarray, image_size: int, fmt: str,
@@ -113,6 +115,7 @@ def preprocess(img_bgr: np.ndarray, image_size: int, fmt: str,
                 declared RGB regardless of input_color_order (see export_coreml.py)
       - tflite: 1,H,W,3 float32 NHWC BGR (onnx2tf's conversion lands the
                 model on NHWC, not NCHW -- see export_tflite.py's docstring)
+      - tfjs:   identical to tflite (same onnx2tf SavedModel underneath)
     For coreml, pt_input is raw uint8 CHW (matching the real deployment
     contract -- a raw image, normalization done INSIDE the wrapper, see
     RetinaStaticExportWrapper.forward's mean-subtraction) in
@@ -131,7 +134,7 @@ def preprocess(img_bgr: np.ndarray, image_size: int, fmt: str,
         ordered = canvas_rgb if input_color_order == "rgb" else canvas_bgr
         pt_input = ordered.astype(np.uint8).transpose(2, 0, 1)[None]
         backend_input = canvas_rgb.astype(np.uint8)
-    elif fmt == "tflite":
+    elif fmt in ("tflite", "tfjs"):
         pt_input = np.float32(canvas_bgr).transpose(2, 0, 1)[None]
         backend_input = canvas_bgr[None].astype(np.float32)
     else:  # onnx
@@ -215,7 +218,28 @@ def load_backend(fmt: str, artifact_path: str, image_size: int, compute_units: s
             "output_details": interp.get_output_details(),
         }, True
 
+    if fmt == "tfjs":
+        # TF.js has no Python runtime: spawn the Node worker (loads the graph
+        # model once, CPU tfjs-node backend -- no GPU build is usable for this
+        # Blackwell card) and talk to it over pipes, see worker.js's header.
+        import subprocess
+        worker_dir = Path(__file__).resolve().parent / "tfjs_worker"
+        assert (worker_dir / "node_modules").exists(), (
+            f"run `npm install` in {worker_dir} first (needs node on PATH, e.g. `. /opt/nvm/nvm.sh`)"
+        )
+        proc = subprocess.Popen(["node", str(worker_dir / "worker.js"), artifact_path, str(image_size)],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        ready = proc.stdout.read(5)
+        assert ready == b"READY", f"tfjs worker failed to start (got {ready!r}) -- see its stderr above"
+        return {"proc": proc}, True
+
     raise ValueError(fmt)
+
+
+def _read_exact(stream, n: int) -> bytes:
+    data = stream.read(n)
+    assert len(data) == n, "tfjs worker closed its pipe early -- see its stderr above"
+    return data
 
 
 def run_backend(fmt: str, state: dict, backend_input: np.ndarray):
@@ -239,6 +263,17 @@ def run_backend(fmt: str, state: dict, backend_input: np.ndarray):
         # examples/*_inference.py script for this format.
         outs = {d["shape"][-1]: interp.get_tensor(d["index"]) for d in state["output_details"]}
         return outs[4], outs[1], outs[10]
+
+    if fmt == "tfjs":
+        proc = state["proc"]
+        proc.stdin.write(np.ascontiguousarray(backend_input, dtype="<f4").tobytes())
+        proc.stdin.flush()
+        res = []
+        for width in (4, 1, 10):  # worker's fixed response order: boxes, scores, landmarks
+            count = int.from_bytes(_read_exact(proc.stdout, 4), "little")
+            arr = np.frombuffer(_read_exact(proc.stdout, count * 4), dtype="<f4")
+            res.append(arr.reshape(-1, width))
+        return tuple(res)
 
     raise ValueError(fmt)
 
@@ -280,7 +315,7 @@ def write_prediction(save_folder: Path, img_name: str, boxes, scores):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--format", required=True, choices=["onnx", "coreml", "tflite"])
+    p.add_argument("--format", required=True, choices=["onnx", "coreml", "tflite", "tfjs"])
     p.add_argument("--network", required=True)
     p.add_argument("--checkpoint", default=None, help="local export_pytorch.py output -- combined .zip or "
                                                         "bare .pth -- mutually exclusive with "
@@ -382,10 +417,10 @@ def main():
     if artifact_arg.endswith(".zip"):
         tmp_ctx = tempfile.TemporaryDirectory()
         with zipfile.ZipFile(artifact_arg) as zf:
-            if artifact_name in zf.namelist():
+            if fmt != "tfjs" and artifact_name in zf.namelist():
                 zf.extract(artifact_name, tmp_ctx.name)
             else:
-                zf.extractall(tmp_ctx.name)  # coreml's .mlpackage is a directory tree, not one member
+                zf.extractall(tmp_ctx.name)  # coreml's .mlpackage / tfjs's model.json + weight shards are multi-file
         artifact_path = str(Path(tmp_ctx.name) / artifact_name)
     else:
         artifact_path = artifact_arg
@@ -494,6 +529,9 @@ def main():
     else:
         print(f"\n({fmt.upper()}-side AP and parity skipped -- see warning above)")
 
+    if fmt == "tfjs":
+        backend_state["proc"].stdin.close()
+        backend_state["proc"].wait(timeout=30)
     if tmp_ctx is not None:
         tmp_ctx.cleanup()
 
