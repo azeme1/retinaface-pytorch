@@ -27,15 +27,23 @@ RESULTS_ROOT = Path(__file__).resolve().parents[1] / "results"
 # pytorch/<network>_cK.zip files are what the "checkpoint" column below links
 # to, when they've actually been staged there.
 STAGE_ROOT = Path(os.environ["LLWLL_ROOT"]) / "external" / "hf_push_staging"
+HF_REPO_ID = "azemel/retinaface-xs"
 
 
 def checkpoint_link(network: str, label: str) -> str:
     """label is "float32" or a cluster-count string like "7". Returns a
-    relative path (from the staging repo's own README) if that checkpoint
-    has actually been staged, else "n/a" -- never fabricate a path for a
-    file that doesn't exist yet."""
-    rel = f"checkpoints/{network}/pytorch/{network}_{'float32' if label == 'float32' else 'c' + label}.zip"
-    return f"`{rel}`" if (STAGE_ROOT / rel).exists() else "n/a"
+    Markdown link (short filename text, pointing at the real HF download
+    URL) if that checkpoint has actually been staged locally, else "n/a" --
+    never fabricate a link for a file that doesn't exist yet. Staged-locally
+    is used as the existence gate (not a live HF check) since this table is
+    generated once per sweep and by the time it's staged the corresponding
+    push has consistently followed close behind in this project's workflow."""
+    fname = f"{network}_{'float32' if label == 'float32' else 'c' + label}.zip"
+    rel = f"checkpoints/{network}/pytorch/{fname}"
+    if not (STAGE_ROOT / rel).exists():
+        return "n/a"
+    url = f"https://huggingface.co/{HF_REPO_ID}/resolve/main/{rel}"
+    return f"[{fname}]({url})"
 
 
 def build_table(network: str) -> str:
