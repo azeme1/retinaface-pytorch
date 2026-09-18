@@ -35,6 +35,7 @@
 #   export HF_TOKEN=hf_...          # required -- WRITE access to azemel/retinaface-xs for the upload step
 #   ./publish_coreml.sh BOTH [match_tolerance_pct]     # validate on CPU_ONLY AND CPU_AND_GPU, upload only if both match
 #   ONLY_NETWORKS="resnet50" ./publish_coreml.sh BOTH  # restrict to some backbones
+#   ONLY_NETWORKS="mobilenetv1" ONLY_LEVELS="c256" ./publish_coreml.sh BOTH  # ...and some levels
 #   ./publish_coreml.sh CPU|MPS [match_tolerance_pct]  # a single compute unit
 #
 # match_tolerance_pct (optional, default 0.5): max acceptable
@@ -103,6 +104,9 @@ for pair in "${PAIRS[@]}"; do
     continue
   fi
   for level in $levels; do
+    if [ -n "${ONLY_LEVELS:-}" ] && [[ " ${ONLY_LEVELS} " != *" ${level} "* ]]; then
+      continue
+    fi
     name="${network}_${level}"
     log_file="${LOG_DIR}/${name}_${1}.log"
     mlpackage_dir="${BUILD_DIR}/${network}"
