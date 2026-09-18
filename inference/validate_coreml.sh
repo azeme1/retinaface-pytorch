@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs export_check.py --format coreml (PyTorch vs CoreML, real WIDER FACE AP)
 # for every CoreML export currently staged on the Hugging Face repo, for every
-# backbone except resnet50 (still training). macOS only -- CoreML's
+# backbone. macOS only -- CoreML's
 # .predict() needs libcoremlpython, which doesn't exist on Linux.
 #
 # Which backend to run every checkpoint on is a REQUIRED first argument --
@@ -75,6 +75,7 @@ declare -a PAIRS=(
   "mobilenetv2:c2 c5 c64 c256"
   "resnet18:c2 c5 c32 c256"
   "resnet34:c2 c4 c128 c256"
+  "resnet50:c2 c4 c128 c256"
 )
 
 for pair in "${PAIRS[@]}"; do

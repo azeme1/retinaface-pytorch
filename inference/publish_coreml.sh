@@ -26,12 +26,16 @@
 # Same backend-argument requirement as validate_coreml.sh, and for the same
 # reason -- see that script's own header comment on why CoreML's own
 # default (letting it pick ANE/GPU/CPU per-op) is not safe to silently
-# trust here.
+# trust here. Publish with BOTH: CPU_ONLY alone cannot see the GPU-path bug
+# (dense spatial convs palettized at 2/4/8 bits are wrong on CPU_AND_GPU --
+# see export_coreml.py's _GPU_SAFE_SPATIAL_NBITS).
 #
 # Usage:
 #   pip install coremltools opencv-python numpy torch tqdm pillow huggingface_hub
 #   export HF_TOKEN=hf_...          # required -- WRITE access to azemel/retinaface-xs for the upload step
-#   ./publish_coreml.sh CPU|MPS [match_tolerance_pct]
+#   ./publish_coreml.sh BOTH [match_tolerance_pct]     # validate on CPU_ONLY AND CPU_AND_GPU, upload only if both match
+#   ONLY_NETWORKS="resnet50" ./publish_coreml.sh BOTH  # restrict to some backbones
+#   ./publish_coreml.sh CPU|MPS [match_tolerance_pct]  # a single compute unit
 #
 # match_tolerance_pct (optional, default 0.5): max acceptable
 # |pytorch_mean - coreml_mean| in AP percentage points to call a level a
@@ -56,15 +60,17 @@ INFER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${HF_TOKEN:?Set HF_TOKEN to a token with WRITE access to azemel/retinaface-xs}"
 
 if [ $# -lt 1 ] || [ -z "$1" ]; then
-  echo "Usage: $0 CPU|MPS [match_tolerance_pct]" >&2
-  echo "  backend is REQUIRED, no default -- CPU (coremltools CPU_ONLY) or MPS (coremltools CPU_AND_GPU)" >&2
+  echo "Usage: [ONLY_NETWORKS=\"resnet50 ...\"] $0 CPU|MPS|BOTH [match_tolerance_pct]" >&2
+  echo "  backend is REQUIRED, no default -- CPU (coremltools CPU_ONLY), MPS (coremltools CPU_AND_GPU) or BOTH" >&2
+  echo "  (BOTH validates on each and uploads only if every one matches PyTorch -- use this to publish)" >&2
   exit 1
 fi
 
 case "$1" in
-  CPU)  COMPUTE_UNITS="CPU_ONLY" ;;
-  MPS)  COMPUTE_UNITS="CPU_AND_GPU" ;;
-  *)    echo "Invalid backend '$1' -- must be CPU or MPS" >&2; exit 1 ;;
+  CPU)  COMPUTE_UNITS_LIST="CPU_ONLY" ;;
+  MPS)  COMPUTE_UNITS_LIST="CPU_AND_GPU" ;;
+  BOTH) COMPUTE_UNITS_LIST="CPU_AND_GPU CPU_ONLY" ;;   # GPU (MPS) first: it is the path that can be wrong
+  *)    echo "Invalid backend '$1' -- must be CPU, MPS or BOTH" >&2; exit 1 ;;
 esac
 
 REPO="azemel/retinaface-xs"
@@ -87,11 +93,15 @@ declare -a PAIRS=(
   "mobilenetv2:c2 c5 c64 c256"
   "resnet18:c2 c5 c32 c256"
   "resnet34:c2 c4 c128 c256"
+  "resnet50:c2 c4 c128 c256"
 )
 
 for pair in "${PAIRS[@]}"; do
   network="${pair%%:*}"
   levels="${pair#*:}"
+  if [ -n "${ONLY_NETWORKS:-}" ] && [[ " ${ONLY_NETWORKS} " != *" ${network} "* ]]; then
+    continue
+  fi
   for level in $levels; do
     name="${network}_${level}"
     log_file="${LOG_DIR}/${name}_${1}.log"
@@ -123,48 +133,57 @@ for pair in "${PAIRS[@]}"; do
       continue
     fi
 
-    echo "########## ${name}: full 3226-image WIDER FACE validation (pytorch vs NEW coreml) ##########" >> "$log_file"
-    python3 "${INFER_DIR}/export_check.py" --format coreml --network "$network" \
-      --checkpoint-url "$ckpt_url" --hf-token "$HF_TOKEN" --artifact "$mlpackage" \
-      --input-color-order rgb --compute-units "$COMPUTE_UNITS" \
-      --image-size "$IMAGE_SIZE" >> "$log_file" 2>&1
-    check_status=$?
-
     {
       echo
       echo "########## ${name} (${1}) ##########"
     } >> "$SUMMARY"
 
-    if [ $check_status -ne 0 ]; then
-      echo "FAILED (exit $check_status) -- last 20 lines of ${log_file}:" >> "$SUMMARY"
-      tr '\r' '\n' < "$log_file" | tail -20 >> "$SUMMARY"
-      echo "${name}: FAILED (exit $check_status) -- tail written to ${SUMMARY}, full log at ${log_file}"
-      continue
-    fi
+    all_match=1
+    for unit in $COMPUTE_UNITS_LIST; do
+      unit_log="${LOG_DIR}/${name}_${unit}.log"
+      echo "########## ${name}: full 3226-image WIDER FACE validation (pytorch vs NEW coreml, ${unit}) -> ${unit_log} ##########" >> "$log_file"
+      python3 "${INFER_DIR}/export_check.py" --format coreml --network "$network" \
+        --checkpoint-url "$ckpt_url" --hf-token "$HF_TOKEN" --artifact "$mlpackage" \
+        --input-color-order rgb --compute-units "$unit" \
+        --image-size "$IMAGE_SIZE" > "$unit_log" 2>&1
+      check_status=$?
+      if [ $check_status -ne 0 ]; then
+        echo "${name} [${unit}]: FAILED (exit $check_status) -- last 20 lines of ${unit_log}:" >> "$SUMMARY"
+        tr '\r' '\n' < "$unit_log" | tail -20 >> "$SUMMARY"
+        echo "${name} [${unit}]: FAILED (exit $check_status) -- see ${unit_log}"
+        all_match=0
+        continue
+      fi
 
-    # Same block-extraction convention as validate_coreml.sh.
-    block=$(tr '\r' '\n' < "$log_file" | awk "/${network//./\\.}: PyTorch vs COREML ===/,0")
-    if [ -z "$block" ]; then
-      echo "exited 0 but no comparison block found -- check ${log_file} directly" >> "$SUMMARY"
-      echo "${name}: exited 0 but no comparison block found -- check ${log_file}"
-      continue
-    fi
-    echo "$block" >> "$SUMMARY"
+      # Same block-extraction convention as validate_coreml.sh.
+      block=$(tr '\r' '\n' < "$unit_log" | awk "/${network//./\\.}: PyTorch vs COREML ===/,0")
+      if [ -z "$block" ]; then
+        echo "${name} [${unit}]: exited 0 but no comparison block found -- check ${unit_log}" | tee -a "$SUMMARY"
+        all_match=0
+        continue
+      fi
+      { echo "[${unit}]"; echo "$block"; } >> "$SUMMARY"
 
-    pt_mean=$(tr '\r' '\n' < "$log_file" | grep -A4 "PyTorch (fixed-size wrapper)" | grep "Average:" | head -1 | grep -oE '[0-9.]+')
-    cm_mean=$(tr '\r' '\n' < "$log_file" | grep -A4 "^=== ${network}: COREML" | grep "Average:" | head -1 | grep -oE '[0-9.]+')
+      # Parsed from the comparison table itself ("Average  60.77%  60.77%  +0.00%"),
+      # not by searching near the individual report headers: those sit tens of
+      # lines before their Average line once tqdm's \r progress is expanded.
+      avg_line=$(echo "$block" | grep "^Average")
+      pt_mean=$(echo "$avg_line" | awk '{print $2}' | tr -d '%')
+      cm_mean=$(echo "$avg_line" | awk '{print $3}' | tr -d '%')
+      if [ -z "$pt_mean" ] || [ -z "$cm_mean" ]; then
+        echo "${name} [${unit}]: could not parse Average AP -- check ${unit_log} manually" | tee -a "$SUMMARY"
+        all_match=0
+        continue
+      fi
 
-    if [ -z "$pt_mean" ] || [ -z "$cm_mean" ]; then
-      echo "${name}: could not parse Average AP -- check ${log_file} manually, NOT uploading" | tee -a "$SUMMARY"
-      continue
-    fi
+      is_match=$(python3 -c "print(1 if abs($pt_mean - $cm_mean) <= $MATCH_TOLERANCE_PCT else 0)")
+      diff=$(python3 -c "print(f'{abs($pt_mean - $cm_mean):.3f}')")
+      echo "${name} [${unit}]: pytorch=${pt_mean}% coreml=${cm_mean}% diff=${diff}pp (tolerance ${MATCH_TOLERANCE_PCT}pp)" | tee -a "$SUMMARY"
+      [ "$is_match" = "1" ] || all_match=0
+    done
 
-    is_match=$(python3 -c "print(1 if abs($pt_mean - $cm_mean) <= $MATCH_TOLERANCE_PCT else 0)")
-    diff=$(python3 -c "print(f'{abs($pt_mean - $cm_mean):.3f}')")
-    echo "${name}: pytorch=${pt_mean}% coreml=${cm_mean}% diff=${diff}pp (tolerance ${MATCH_TOLERANCE_PCT}pp)" | tee -a "$SUMMARY"
-
-    if [ "$is_match" != "1" ]; then
-      echo "${name}: MISMATCH -- NOT uploading, needs investigation" | tee -a "$SUMMARY"
+    if [ "$all_match" != "1" ]; then
+      echo "${name}: NOT uploading -- did not match PyTorch on every requested compute unit (${COMPUTE_UNITS_LIST})" | tee -a "$SUMMARY"
       continue
     fi
 
