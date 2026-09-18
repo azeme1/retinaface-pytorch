@@ -82,7 +82,7 @@ BUILD_DIR="${INFER_DIR}/coreml_publish_build"
 SUMMARY="${INFER_DIR}/coreml_publish_summary_${1}.log"
 
 mkdir -p "$LOG_DIR" "$BUILD_DIR"
-: > "$SUMMARY"
+touch "$SUMMARY"   # append, never truncate: earlier runs' results stay in the summary
 
 # Same pairs, same source of truth as validate_coreml.sh -- the README's
 # "exported cluster counts (CoreML)" table. Don't expand to every pytorch
