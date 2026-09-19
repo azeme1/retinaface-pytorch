@@ -1,5 +1,5 @@
 """Builds the Markdown "exported formats vs PyTorch" verification table for
-external/hf_push_staging/README.md from the per-run logs that
+external/retinaface-xs/README.md from the per-run logs that
 validate_onnx.sh / validate_tflite.sh / validate_tfjs.sh write
 (onnx_verify_logs/, tflite_verify_logs/, tfjs_verify_logs/, run from this
 directory). Each log holds one export_check.py run: real full-val WIDER FACE
@@ -8,7 +8,7 @@ from the HF repo.
 
 Usage:
     python generate_export_verification_table.py
-    python generate_export_verification_table.py --out ../../hf_push_staging/README.md \\
+    python generate_export_verification_table.py --out ../../retinaface-xs/README.md \\
         --section-marker "EXPORT VERIFICATION"
 """
 import argparse

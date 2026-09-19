@@ -2,7 +2,7 @@
 
 Generated 2026-09-19 by `inference/validate_pytorch.sh resnet50 ...` (`inference/export_check.py --format pytorch`).
 
-- **Files:** `checkpoints/resnet50/pytorch/resnet50_<level>.zip` in `hf_push_staging/` (local) and in the HF repo `azemel/retinaface-xs`.
+- **Files:** `checkpoints/resnet50/pytorch/resnet50_<level>.zip` in `retinaface-xs/` (local) and in the HF repo `azemel/retinaface-xs`.
 - **Hash:** sha256 of the local zip, compared to the sha256 HF advertises for the same file (LFS). All 14 match.
 - **Metrics:** real full-val WIDER FACE AP (3226 images) of the checkpoint downloaded from HF, run through the fixed-size `RetinaStaticExportWrapper` (640x640 letterbox) on CUDA. This is the same reference AP the ONNX/TFLite/TFJS checks compare against. It is *not* comparable to `results/resnet50/full_eval_parallel/*.json` (that uses the variable-size pipeline).
 

@@ -2,7 +2,7 @@
 
 Generated 2026-09-19 by `inference/generate_checkpoint_md.py` from the logs of `inference/validate_onnx.sh` (`inference/export_check.py --format onnx`).
 
-- **Files:** `checkpoints/<backbone>/onnx/<backbone>_<level>.zip` in the HF repo `azemel/retinaface-xs` (33 files).
+- **Files:** `checkpoints/<backbone>/onnx/<backbone>_<level>.zip` in the HF repo `azemel/retinaface-xs` (35 files).
 - **Hash:** sha256 HF advertises (LFS) for the file. Every file was also re-downloaded fresh from HF and its sha256 recomputed: all matched (2026-09-19). No local copies are kept.
 - **Metrics:** real full-val WIDER FACE AP (3226 images) of the artifact downloaded from HF, run through ONNX Runtime CUDAExecutionProvider vs. a CUDA PyTorch reference, on the fixed-size 640x640 letterbox preprocessing; "vs PyTorch" is the difference in mean AP from the PyTorch `RetinaStaticExportWrapper` run in the same script. Not comparable to `results/<network>/full_eval_parallel/*.json` (variable-size pipeline).
 
@@ -20,6 +20,7 @@ Generated 2026-09-19 by `inference/generate_checkpoint_md.py` from the logs of `
 | mobilenetv1_0.25 | float32 | 1.77 | `3416c103477e161e3c5335bcf743cde66e58ae80f2c5724c4e34b8adc8c8108b` | n/a | n/a | n/a | n/a | n/a |
 | mobilenetv1_0.50 | c2 | 0.54 | `ef66fb396635225376c3507e9316c7d7dacdf749eacf50cba5c8053921d31e4c` | 69.41 | 49.76 | 20.82 | 46.66 | +0.01 |
 | mobilenetv1_0.50 | c8 | 1.05 | `d2f2f9bc79cc738d3e613f9e7ca7836a92ec7a365584bdd825971d2ac064e0e1` | 86.59 | 77.97 | 42.38 | 68.98 | +0.01 |
+| mobilenetv1_0.50 | c12 | 1.24 | `f3bf1f14680b8b66e93e1c9b5acdce41885be31b459c664888ebcdba7f14f42a` | 86.52 | 78.21 | 43.11 | 69.28 | -0.00 |
 | mobilenetv1_0.50 | c256 | 4.75 | `0e0c874fa671a5cfed3299198496ae51aa2b6c9c12bbd7605da560190605e114` | 87.33 | 79.33 | 44.29 | 70.32 | -0.00 |
 | mobilenetv1_0.50 | float32 | 6.32 | `832372391dccddabf2798694d322957c548fc14ff95ac12a981d7e5e5748d206` | n/a | n/a | n/a | n/a | n/a |
 | mobilenetv2 | c2 | 0.93 | `95a2530b1fceca7c0080700c8a5506f62c285b927cf01a669dd911600cd07424` | 79.53 | 65.78 | 29.81 | 58.37 | +0.00 |
@@ -41,5 +42,6 @@ Generated 2026-09-19 by `inference/generate_checkpoint_md.py` from the logs of `
 | resnet50 | c4 | 7.74 | `23691b05a3128740266175132d1544861c8f308dd184be6e120861f748b17db9` | 92.62 | 87.58 | 53.93 | 78.05 | -0.01 |
 | resnet50 | c128 | 37.51 | `b03c1236ea04f5caa93d51f855236d036f251aef7c8196d679108d529123af01` | 92.82 | 87.10 | 52.49 | 77.47 | -0.01 |
 | resnet50 | c256 | 50.64 | `de31d179cb992a60344950049261847e0fca0843b4c23699197c7f64d580355b` | 92.79 | 87.12 | 52.26 | 77.39 | -0.00 |
+| resnet50 | float32 | 101.63 | `15ed6d1d9bff807b86f6c7b21e6fa36cf9e3e4722e2e982830a7f6be85298bee` | 93.52 | 88.86 | 58.04 | 80.14 | +0.00 |
 
 AP values are percentages; `n/a` = not verified (6 file(s)) -- the validate scripts skip `float32` levels.

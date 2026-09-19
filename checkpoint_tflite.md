@@ -2,7 +2,7 @@
 
 Generated 2026-09-19 by `inference/generate_checkpoint_md.py` from the logs of `inference/validate_tflite.sh` (`inference/export_check.py --format tflite`).
 
-- **Files:** `checkpoints/<backbone>/tflite/<backbone>_<level>.zip` in the HF repo `azemel/retinaface-xs` (33 files).
+- **Files:** `checkpoints/<backbone>/tflite/<backbone>_<level>.zip` in the HF repo `azemel/retinaface-xs` (35 files).
 - **Hash:** sha256 HF advertises (LFS) for the file. Every file was also re-downloaded fresh from HF and its sha256 recomputed: all matched (2026-09-19). No local copies are kept.
 - **Metrics:** real full-val WIDER FACE AP (3226 images) of the artifact downloaded from HF, run through `tf.lite.Interpreter` (CPU -- no GPU delegate exists for it here), on the fixed-size 640x640 letterbox preprocessing; "vs PyTorch" is the difference in mean AP from the PyTorch `RetinaStaticExportWrapper` run in the same script. Not comparable to `results/<network>/full_eval_parallel/*.json` (variable-size pipeline).
 - **Reference device:** `resnet50` rows ran against a CUDA PyTorch reference; every other backbone's rows ran against a CPU PyTorch reference (an earlier run pinned to CPU) -- PyTorch CPU vs CUDA differs by ~0.02% mean AP, so the "vs PyTorch" column is comparable to that precision.
@@ -21,6 +21,7 @@ Generated 2026-09-19 by `inference/generate_checkpoint_md.py` from the logs of `
 | mobilenetv1_0.25 | float32 | 0.60 | `3f4ff05bc53d5692f0fa6b6c1ca314192322f0e3d2140e7e852f3cb8db4203e5` | 86.47 | 77.02 | 41.11 | 68.20 | +0.05 |
 | mobilenetv1_0.50 | c2 | 0.60 | `8dc265e4efe9a3b4b6a3a10a50939a97b3e54b8867e75279d1812f4576e7a2e5` | 69.20 | 49.54 | 20.73 | 46.49 | -0.18 |
 | mobilenetv1_0.50 | c8 | 1.26 | `f0a7a85abb31e2b96eaec05551c9170e229a9b39c3b30cdd280b237710f197aa` | 86.77 | 77.82 | 41.91 | 68.83 | -0.13 |
+| mobilenetv1_0.50 | c12 | 1.51 | `b39dc6b46ba8210fde4139135b34fad2bc3049f839da6ca4d5a0de631ce93b1a` | 86.70 | 78.42 | 43.56 | 69.56 | +0.27 |
 | mobilenetv1_0.50 | c256 | 1.75 | `81c65f30559d04c7e856045be560593f238f22a609fd04b94050dbc46fe85aed` | 87.25 | 79.28 | 44.33 | 70.29 | -0.03 |
 | mobilenetv1_0.50 | float32 | 1.75 | `b781c49e7f360c8b648af5d4478c313dbbe03cd151c3ddb67e692a78900a5999` | 87.16 | 78.80 | 43.65 | 69.87 | -0.06 |
 | mobilenetv2 | c2 | 1.04 | `4f25d5088533037406b4c9ef988b921fda05b17d23c43dec3f2be548b3e89650` | 79.62 | 66.00 | 29.97 | 58.53 | +0.18 |
@@ -42,5 +43,6 @@ Generated 2026-09-19 by `inference/generate_checkpoint_md.py` from the logs of `
 | resnet50 | c4 | 9.91 | `62588f2c4bbe9d5e9a1a72fd963f3c44c90ef3eae323c10e68ac1ed3e9bb2fbe` | 92.40 | 87.38 | 53.96 | 77.91 | -0.14 |
 | resnet50 | c128 | 24.17 | `f9ceeb5269f7b6d51b955c7a1a32f2a436165bf1546a66c77a8ce32b8643cbd4` | 92.78 | 86.96 | 52.31 | 77.35 | -0.13 |
 | resnet50 | c256 | 24.17 | `e87c986c585e11ea17a92656b8c6efb683ed39fbecfbf4839a6a78f61d896808` | 92.78 | 87.13 | 52.23 | 77.38 | -0.01 |
+| resnet50 | float32 | 23.42 | `99ba5e2eb838963a7795053a2cd1763d96c5d5fe1ca94f28ee098396ce158f32` | 93.37 | 88.78 | 58.00 | 80.05 | -0.09 |
 
 AP values are percentages.

@@ -1,4 +1,4 @@
-"""Generates the Markdown metrics table used in external/hf_push_staging/README.md
+"""Generates the Markdown metrics table used in external/retinaface-xs/README.md
 for one RetinaFace backbone's compression sweep: real WIDER FACE full-val
 AP (easy/medium/hard/mean) per cluster count, average metric drop vs. the
 float32 baseline, estimated PyTorch weight-only model size, and compression
@@ -13,7 +13,7 @@ full-val sweep have both completed).
 Usage:
     python inference/generate_metrics_table.py --network mobilenetv1
     python inference/generate_metrics_table.py --network mobilenetv1 mobilenetv1_0.25 \\
-        --out external/hf_push_staging/README.md --section-marker "<!-- METRICS -->"
+        --out external/retinaface-xs/README.md --section-marker "<!-- METRICS -->"
 """
 import argparse
 import json
@@ -22,11 +22,11 @@ import re
 from pathlib import Path
 
 RESULTS_ROOT = Path(__file__).resolve().parents[1] / "results"
-# The raw-checkpoint staging repo (external/hf_push_staging) is a sibling of
+# The raw-checkpoint staging repo (external/retinaface-xs) is a sibling of
 # this repo under LLWLL_ROOT, not a subdirectory of it -- its results/<network>/
 # pytorch/<network>_cK.zip files are what the "checkpoint" column below links
 # to, when they've actually been staged there.
-STAGE_ROOT = Path(os.environ["LLWLL_ROOT"]) / "external" / "hf_push_staging"
+STAGE_ROOT = Path(os.environ["LLWLL_ROOT"]) / "external" / "retinaface-xs"
 HF_REPO_ID = "azemel/retinaface-xs"
 
 

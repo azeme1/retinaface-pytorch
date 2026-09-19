@@ -17,7 +17,7 @@ from huggingface_hub import HfApi
 
 HERE = Path(__file__).resolve().parent
 REPO = "azemel/retinaface-xs"
-STAGE = HERE.parents[1] / "hf_push_staging" / "checkpoints"  # files built locally but not on HF yet
+STAGE = HERE.parents[1] / "retinaface-xs" / "checkpoints"  # files built locally but not on HF yet
 ORDER = ["mobilenetv1", "mobilenetv1_0.25", "mobilenetv1_0.50", "mobilenetv2", "resnet18", "resnet34", "resnet50"]
 META = {
     "onnx": ("ONNX", "ONNX Runtime CUDAExecutionProvider vs. a CUDA PyTorch reference", "_CUDA"),
@@ -63,7 +63,7 @@ def main():
         if fmt != "onnx":
             out.append("- **Reference device:** `resnet50` rows ran against a CUDA PyTorch reference; every other backbone's rows ran against a CPU PyTorch reference (an earlier run pinned to CPU) -- PyTorch CPU vs CUDA differs by ~0.02% mean AP, so the \"vs PyTorch\" column is comparable to that precision.")
         if pending:
-            out.append(f"- **Not on HF yet:** {len(pending)} row(s) marked `(local)` are built and verified locally (`hf_push_staging/`) but not uploaded; their sha256 is of the local zip.")
+            out.append(f"- **Not on HF yet:** {len(pending)} row(s) marked `(local)` are built and verified locally (`retinaface-xs/`) but not uploaded; their sha256 is of the local zip.")
         out += ["", "| backbone | level | size (MB) | sha256 | easy | medium | hard | mean | mean vs PyTorch |", "|---|---|---|---|---|---|---|---|---|"]
         missing = 0
         for net, lvl, size, sha in files:
