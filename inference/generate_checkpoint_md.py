@@ -24,14 +24,14 @@ META = {
     "tflite": ("TFLite", "`tf.lite.Interpreter` (CPU -- no GPU delegate exists for it here)", ""),
     "tfjs": ("TF.js", "`@tensorflow/tfjs-node` under Node.js (CPU backend -- no usable GPU build)", ""),
 }
-ROW = re.compile(r"^(Easy|Medium|Hard|Average)\s+([\d.]+)%\s+([\d.]+)%\s+([+-][\d.]+)%", re.M)
+ROW = re.compile(r"^(Easy|Medium|Hard)\s+([\d.]+)%\s+([\d.]+)%\s+([+-][\d.]+)%", re.M)  # per-subset only: no averaging across easy/medium/hard
 
 
 def parse(path: Path):
     if not path.exists():
         return None
     rows = {k: (float(a), float(b), float(d)) for k, a, b, d in ROW.findall(path.read_text().replace("\r", "\n"))}
-    return rows if len(rows) == 4 else None
+    return rows if len(rows) == 3 else None
 
 
 def main():
@@ -58,20 +58,20 @@ def main():
                f"Generated {datetime.date.today()} by `inference/generate_checkpoint_md.py` from the logs of `inference/validate_{fmt}.sh` (`inference/export_check.py --format {fmt}`).", "",
                f"- **Files:** `checkpoints/<backbone>/{fmt}/<backbone>_<level>.zip` in the HF repo `{REPO}` ({len(files)} files).",
                "- **Hash:** sha256 HF advertises (LFS) for the file. Every file was also re-downloaded fresh from HF and its sha256 recomputed: all matched (2026-09-19). No local copies are kept.",
-               f"- **Metrics:** real full-val WIDER FACE AP (3226 images) of the artifact downloaded from HF, run through {backend}, on the fixed-size 640x640 letterbox preprocessing; \"vs PyTorch\" is the difference in mean AP from the PyTorch `RetinaStaticExportWrapper` run in the same script. Not comparable to `results/<network>/full_eval_parallel/*.json` (variable-size pipeline).",
+               f"- **Metrics:** real full-val WIDER FACE AP (3226 images) of the artifact downloaded from HF, run through {backend}, on the fixed-size 640x640 letterbox preprocessing; \"Δ\" is the difference in AP (percentage points) from the PyTorch `RetinaStaticExportWrapper` run in the same script, per subset -- easy, medium and hard are three separate metrics (they score 7,211 / 13,319 / 31,958 faces) and are never averaged. Not comparable to `results/<network>/full_eval_parallel/*.json` (variable-size pipeline).",
                ]
         if fmt != "onnx":
-            out.append("- **Reference device:** `resnet50` rows ran against a CUDA PyTorch reference; every other backbone's rows ran against a CPU PyTorch reference (an earlier run pinned to CPU) -- PyTorch CPU vs CUDA differs by ~0.02% mean AP, so the \"vs PyTorch\" column is comparable to that precision.")
+            out.append("- **Reference device:** `resnet50` rows ran against a CUDA PyTorch reference; every other backbone's rows ran against a CPU PyTorch reference (an earlier run pinned to CPU) -- PyTorch CPU vs CUDA differs by up to 0.05 / 0.05 / 0.07 points (easy / medium / hard, measured over the 30 overlapping runs), so the Δ columns are only meaningful to about that precision.")
         if pending:
             out.append(f"- **Not on HF yet:** {len(pending)} row(s) marked `(local)` are built and verified locally (`retinaface-xs/`) but not uploaded; their sha256 is of the local zip.")
-        out += ["", "| backbone | level | size (MB) | sha256 | easy | medium | hard | mean | mean vs PyTorch |", "|---|---|---|---|---|---|---|---|---|"]
+        out += ["", "| backbone | level | size (MB) | sha256 | easy | medium | hard | Δ easy | Δ medium | Δ hard |", "|---|---|---|---|---|---|---|---|---|---|"]
         missing = 0
         for net, lvl, size, sha in files:
             r = parse(HERE / f"{fmt}_verify_logs" / f"{net}_{lvl}{suffix}.log")
             if r:
-                cells = [f"{r[k][1]:.2f}" for k in ("Easy", "Medium", "Hard", "Average")] + [f"{r['Average'][2]:+.2f}"]
+                cells = [f"{r[k][1]:.2f}" for k in ("Easy", "Medium", "Hard")] + [f"{r[k][2]:+.2f}" for k in ("Easy", "Medium", "Hard")]
             else:
-                cells = ["n/a"] * 5
+                cells = ["n/a"] * 6
                 missing += 1
             out.append(f"| {net} | {lvl}{' (local)' if (net, lvl) in pending else ''} | {size / 1e6:.2f} | `{sha}` | " + " | ".join(cells) + " |")
         out += ["", "AP values are percentages" + (f"; `n/a` = not verified ({missing} file(s)) -- the validate scripts skip `float32` levels." if missing else "."), ""]
