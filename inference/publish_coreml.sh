@@ -88,12 +88,12 @@ touch "$SUMMARY"   # append, never truncate: earlier runs' results stay in the s
 # "exported cluster counts (CoreML)" table. Don't expand to every pytorch
 # level (most have no CoreML export to replace at all).
 declare -a PAIRS=(
-  "mobilenetv1:c2 c7 c64 c256"
-  "mobilenetv1_0.25:c2 c12 c128 c256"
-  "mobilenetv1_0.50:c2 c8 c256"
-  "mobilenetv2:c2 c5 c64 c256"
-  "resnet18:c2 c5 c32 c256"
-  "resnet34:c2 c4 c128 c256"
+  "mobilenetv1:float32 c2 c7 c64 c256"
+  "mobilenetv1_0.25:float32 c2 c12 c128 c256"
+  "mobilenetv1_0.50:float32 c2 c8 c256"
+  "mobilenetv2:float32 c2 c5 c64 c256"
+  "resnet18:float32 c2 c5 c32 c256"
+  "resnet34:float32 c2 c4 c128 c256"
   "resnet50:c2 c4 c128 c256"
 )
 
