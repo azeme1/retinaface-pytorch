@@ -90,11 +90,11 @@ touch "$SUMMARY"   # append, never truncate: earlier runs' results stay in the s
 declare -a PAIRS=(
   "mobilenetv1:float32 c2 c7 c64 c256"
   "mobilenetv1_0.25:float32 c2 c12 c128 c256"
-  "mobilenetv1_0.50:float32 c2 c8 c256"
+  "mobilenetv1_0.50:float32 c2 c8 c12 c256"
   "mobilenetv2:float32 c2 c5 c64 c256"
   "resnet18:float32 c2 c5 c32 c256"
   "resnet34:float32 c2 c4 c128 c256"
-  "resnet50:c2 c4 c128 c256"
+  "resnet50:float32 c2 c4 c128 c256"
 )
 
 for pair in "${PAIRS[@]}"; do
