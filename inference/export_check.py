@@ -87,7 +87,7 @@ GT_DIR = str(_RETINA_DIR / "widerface_evaluation/ground_truth")
 # export_onnx.py/export_coreml.py/export_tflite.py's own packaging
 # convention (never the network/cluster name, so nothing about which
 # checkpoint produced it leaks from the archive's own contents).
-ARTIFACT_NAME = {"onnx": "model.onnx", "coreml": "model.mlpackage", "tflite": "model.tflite", "tfjs": "model.json"}
+ARTIFACT_NAME = {"onnx": "model.onnx", "coreml": "model.mlpackage", "tflite": "model.tflite", "tfjs": "model.json", "pytorch": None}  # pytorch: no artifact, wrapper AP only
 # Whether calling this format's own inference entry point concurrently from
 # multiple threads on ONE loaded instance is safe. ONNX Runtime sessions are
 # documented thread-safe for .run(). CoreML's MLModel.predict() is NOT --
@@ -98,7 +98,7 @@ ARTIFACT_NAME = {"onnx": "model.onnx", "coreml": "model.mlpackage", "tflite": "m
 # across threads regardless -- only the native call itself is serialized.
 # TF.js runs in ONE long-lived Node worker process (tfjs_worker/worker.js)
 # talking over a single stdin/stdout pipe pair -- requests must be serialized.
-NEEDS_LOCK = {"onnx": False, "coreml": True, "tflite": True, "tfjs": True}
+NEEDS_LOCK = {"onnx": False, "coreml": True, "tflite": True, "tfjs": True, "pytorch": False}
 
 
 def preprocess(img_bgr: np.ndarray, image_size: int, fmt: str,
@@ -150,6 +150,9 @@ def load_backend(fmt: str, artifact_path: str, image_size: int, compute_units: s
     source_label) -- state is whatever run_backend needs, can_run is False
     only for CoreML on a non-macOS platform (every other case either runs
     or raises immediately at load time)."""
+    if fmt == "pytorch":
+        return {}, False  # PyTorch-only run: no converted artifact to load
+
     if fmt == "onnx":
         import onnxruntime as ort
         # Unlike CoreML's compute-units bug, no correctness issue has been
@@ -315,7 +318,7 @@ def write_prediction(save_folder: Path, img_name: str, boxes, scores):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--format", required=True, choices=["onnx", "coreml", "tflite", "tfjs"])
+    p.add_argument("--format", required=True, choices=["onnx", "coreml", "tflite", "tfjs", "pytorch"])
     p.add_argument("--network", required=True)
     p.add_argument("--checkpoint", default=None, help="local export_pytorch.py output -- combined .zip or "
                                                         "bare .pth -- mutually exclusive with "
@@ -386,11 +389,12 @@ def main():
         )
         model, _ = load_plain_with_clusters_from_hf(cfg, args.hf_repo, args.network, args.hf_level,
                                                      token=args.hf_token)
-        artifact_arg = str(download_hf_artifact(args.hf_repo, args.network, fmt, args.hf_level, token=args.hf_token))
+        artifact_arg = (None if fmt == "pytorch" else
+                        str(download_hf_artifact(args.hf_repo, args.network, fmt, args.hf_level, token=args.hf_token)))
     else:
         checkpoint_arg = _resolve(args.checkpoint, args.checkpoint_url, "checkpoint")
         artifact_arg = _resolve(args.artifact, args.artifact_url, "artifact")
-        assert checkpoint_arg and artifact_arg, (
+        assert checkpoint_arg and (artifact_arg or fmt == "pytorch"), (
             "need --checkpoint/--checkpoint-url + --artifact/--artifact-url (or --hf-repo + --hf-level instead)"
         )
         model, _ = load_plain_with_clusters(cfg, checkpoint_arg)
@@ -414,7 +418,9 @@ def main():
     tmp_ctx = None
     artifact_source_label = artifact_arg
     artifact_name = ARTIFACT_NAME[fmt]
-    if artifact_arg.endswith(".zip"):
+    if fmt == "pytorch":
+        artifact_path = None
+    elif artifact_arg.endswith(".zip"):
         tmp_ctx = tempfile.TemporaryDirectory()
         with zipfile.ZipFile(artifact_arg) as zf:
             if fmt != "tfjs" and artifact_name in zf.namelist():
@@ -432,9 +438,13 @@ def main():
         all_images = [n.lstrip("/") for n in f.read().split()]
     sample = all_images if args.n_images is None else random.Random(0).sample(all_images, args.n_images)
 
-    pt_pred_dir = _RETINA_DIR / "results" / args.network / f"{fmt}_check_pred_pytorch"
-    other_pred_dir = _RETINA_DIR / "results" / args.network / f"{fmt}_check_pred_{fmt}"
-    for d in (pt_pred_dir, other_pred_dir):
+    # Per-level directory suffix: two runs of the same network+format at
+    # different levels (e.g. launched in parallel) must never share -- and
+    # rmtree -- each other's prediction dirs.
+    tag = f"_{args.hf_level}" if args.hf_level else ""
+    pt_pred_dir = _RETINA_DIR / "results" / args.network / f"{fmt}_check_pred_pytorch{tag}"
+    other_pred_dir = _RETINA_DIR / "results" / args.network / f"{fmt}_check_pred_{fmt}{tag}"
+    for d in ((pt_pred_dir,) if fmt == "pytorch" else (pt_pred_dir, other_pred_dir)):
         if d.exists():
             shutil.rmtree(d)
         # run_widerface_evaluation looks up every image in every WIDER FACE
@@ -527,7 +537,8 @@ def main():
         for k, vals in diffs.items():
             print(f"{k}: max={max(vals):.3e} mean={sum(vals)/len(vals):.3e}")
     else:
-        print(f"\n({fmt.upper()}-side AP and parity skipped -- see warning above)")
+        if fmt != "pytorch":
+            print(f"\n({fmt.upper()}-side AP and parity skipped -- see warning above)")
 
     if fmt == "tfjs":
         backend_state["proc"].stdin.close()

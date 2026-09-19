@@ -5,8 +5,8 @@
 #
 # CPU is a REQUIRED first argument -- TF.js runs under Node via tfjs-node's
 # CPU backend (worker in tfjs_worker/, spawned by export_check.py; no usable
-# GPU build), and the PyTorch reference side is pinned to CPU too
-# (CUDA_VISIBLE_DEVICES="") for a same-device comparison.
+# GPU build); the PyTorch reference side runs on CUDA (GPU wherever one is
+# usable) -- only the TF.js interpreter itself is CPU.
 #
 # Usage:
 #   pip install opencv-python numpy torch tqdm huggingface_hub
@@ -41,7 +41,6 @@ if [ "$1" != "CPU" ]; then
 fi
 
 [ -f /opt/nvm/nvm.sh ] && . /opt/nvm/nvm.sh >/dev/null  # puts node on PATH in non-login shells
-export CUDA_VISIBLE_DEVICES=""  # pin the PyTorch reference to CPU too -- see header
 
 REPO="azemel/retinaface-xs"
 IMAGE_SIZE=640

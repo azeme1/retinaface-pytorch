@@ -6,11 +6,9 @@
 # CPU is a REQUIRED first argument -- not because there's a choice (this
 # repo wires no GPU delegate for the TFLite interpreter, see export_tflite.py
 # -- tf.lite.Interpreter is CPU-only here regardless), but for consistency
-# with validate_coreml.sh/validate_onnx.sh's own required-backend argument,
-# and so the PyTorch reference side is also explicitly pinned to CPU
-# (CUDA_VISIBLE_DEVICES="") rather than silently running on GPU while the
-# TFLite side runs on CPU -- a same-device comparison, and one that can't
-# contend with something else training on a shared GPU box.
+# with validate_coreml.sh/validate_onnx.sh's own required-backend argument.
+# The PyTorch reference side runs on CUDA (GPU wherever one is usable); only
+# the TFLite interpreter itself is CPU.
 #
 # Usage:
 #   pip install tensorflow opencv-python numpy torch tqdm
@@ -43,7 +41,6 @@ if [ "$1" != "CPU" ]; then
   exit 1
 fi
 
-export CUDA_VISIBLE_DEVICES=""  # pin the PyTorch reference to CPU too -- see header
 
 REPO="azemel/retinaface-xs"
 IMAGE_SIZE=640
