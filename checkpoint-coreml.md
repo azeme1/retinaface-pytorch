@@ -2,15 +2,15 @@
 
 Verification of the CoreML files published in [`azemel/retinaface-xs`](https://huggingface.co/azemel/retinaface-xs), each bound to the SHA-256 of the exact file that was tested.
 
-**Status: 27 of 27 files verified; every SHA-256 identical to the checksum HF reports: yes; largest |mean-AP difference| PyTorch vs CoreML: 0.00 points.**
+**Status: 35 of 35 files verified; every SHA-256 identical to the checksum HF reports: yes; largest |mean-AP difference| PyTorch vs CoreML: 0.00 points.**
 
 | | |
 |---|---|
-| started / last update | 2026-09-19 16:35 CEST / 2026-09-19 21:31 CEST |
-| HF repo at start | `a7639a47ae`; now `aa9c10797e` (2026-09-19 16:19 UTC) - **the repo changed during the run** |
+| started / last update | 2026-09-19 16:35 CEST / 2026-09-19 23:35 CEST |
+| HF repo at start | `a7639a47ae`; now `c2098841d9` (2026-09-19 21:02 UTC) - **the repo changed during the run** |
 | machine | Apple M1 Pro, macOS 26.6.2 |
 | software | coremltools 9.0, torch 2.12.0, Python 3.12.13 |
-| code | `inference/export_check.py` at `c68361ce09` (working tree has uncommitted changes) |
+| code | `inference/export_check.py` at `07b5e298e1` (working tree has uncommitted changes) |
 | dataset | WIDER FACE val, all 3226 images, fixed 640x640 letterboxed canvas |
 | compute units | `CPU_AND_GPU` (Apple GPU, "MPS") for CoreML; PyTorch reference on MPS |
 
@@ -52,6 +52,14 @@ Verification of the CoreML files published in [`azemel/retinaface-xs`](https://h
 | resnet50 | 4 | 92.61 / 92.61 | 87.59 / 87.59 | 53.92 / 53.92 | 78.04 / 78.04 | +0.00% | `85a398ec8366c8a05aac31f818384b3a7384e25849b7d63c91ae66f8d4da8716` |
 | resnet50 | 128 | 92.82 / 92.82 | 87.10 / 87.10 | 52.48 / 52.48 | 77.47 / 77.47 | +0.00% | `29801f0d2c2ba6b13a3eb3336a78a0fbf34818fd750ff9816d124672ca0e9afe` |
 | resnet50 | 256 | 92.78 / 92.78 | 87.11 / 87.11 | 52.27 / 52.27 | 77.38 / 77.38 | +0.00% | `8f40a8e2ce4dabac9d15cf3fe364a3fcb540fef94ac495118e66e4b8b9cb25ac` |
+| mobilenetv1 | float32 | 88.75 / 88.75 | 81.14 / 81.14 | 47.15 / 47.15 | 72.35 / 72.35 | -0.00% | `4a3761e1291d461daa983d48e7ea73ea43e6677488277c569340c83697da5407` |
+| mobilenetv1_0.25 | float32 | 86.49 / 86.49 | 76.88 / 76.88 | 40.88 / 40.88 | 68.08 / 68.08 | -0.00% | `1a4d3e040e56e042abc6f8e00edae84cc1b0f7bf0c9ed673eefba87fdefa330c` |
+| mobilenetv1_0.50 | float32 | 87.29 / 87.29 | 78.86 / 78.86 | 43.67 / 43.67 | 69.94 / 69.94 | -0.00% | `d7e8b87f3ef06330049f4c2c97d7e16b608398c6a97236503027915d126d2c19` |
+| mobilenetv1_0.50 | 12 | 86.50 / 86.50 | 78.20 / 78.20 | 43.08 / 43.08 | 69.26 / 69.26 | -0.00% | `f85dba0b917265e3bf99de370157e9c3c6db4f40e22ade5b3abea4de860b3ecb` |
+| mobilenetv2 | float32 | 91.95 / 91.95 | 86.39 / 86.39 | 55.35 / 55.35 | 77.90 / 77.90 | +0.00% | `a848d279b6a8e37b67a5b02680bc26cb3b17f5eb1ac67a5084c35bac0678956a` |
+| resnet18 | float32 | 91.73 / 91.73 | 85.51 / 85.51 | 52.43 / 52.43 | 76.56 / 76.56 | +0.00% | `40ea36fc1849636232e06d36dbd494b1307cce7e5926589ba622c99c468e2561` |
+| resnet34 | float32 | 92.67 / 92.67 | 87.31 / 87.31 | 55.19 / 55.19 | 78.39 / 78.39 | -0.00% | `5f7fd21b84f2c2754402e65ecdf45742ac114dd92ab0dc56e883e4d7dba74a43` |
+| resnet50 | float32 | 93.52 / 93.52 | 88.88 / 88.88 | 58.03 / 58.03 | 80.14 / 80.14 | +0.00% | `d8a981414d884e161109d206843b7f8dcb6dc4252b099c326bf6b4bea8fe67ff` |
 
 ## Checksums
 
@@ -84,12 +92,20 @@ Verification of the CoreML files published in [`azemel/retinaface-xs`](https://h
 | resnet50 | 4 | `checkpoints/resnet50/coreml/resnet50_c4.zip` | 7483226 | yes | yes | `88adb46acf940795a334a283453e145b9992787dfaf4a9085c7633b4947aabb9` | `d30efad84ab432007b4cfae00a8b38f45408f4ad5bd6e40e72fe333ac515c9d3` (yes) |
 | resnet50 | 128 | `checkpoints/resnet50/coreml/resnet50_c128.zip` | 44500161 | yes | yes | `f3aaaac92f382511c9ea258ab7067b14844a1acf42d136d12ae5bf3a2a9fa32e` | `17157a5208f9a88a7c2433f654659e5bfb52f41d158c5ebbd5488cfb7dbc0315` (yes) |
 | resnet50 | 256 | `checkpoints/resnet50/coreml/resnet50_c256.zip` | 56936575 | yes | yes | `e291fe1a80de1025c8ecbb00f45b34105f3fb1c563f59074e10f4f8368a84928` | `19ffdbbffa27742dd5b180e60ab9b69b42e65c3459f221e43faefed750f87be1` (yes) |
+| mobilenetv1 | float32 | `checkpoints/mobilenetv1/coreml/mobilenetv1_float32.zip` | 15454861 | yes | yes | `7aa2d53bc53d3a276f6f3073a4c4fb39b875754e3e4af609f25a20e8aac21e18` | `f4bca0a1079a1efea3f02b0518a44b0a58dfd7a92887e7828e2b2d4a961e3b30` (yes) |
+| mobilenetv1_0.25 | float32 | `checkpoints/mobilenetv1_0.25/coreml/mobilenetv1_0.25_float32.zip` | 1651402 | yes | yes | `c1e3eb5c81cde57008bcc3888ac66ba218cc724b9a767c2487902ba7c8c1fc47` | `742da738181610ce2cfeb10a56ab56cb0339a0277797440c0f6c7da0d20edcf2` (yes) |
+| mobilenetv1_0.50 | float32 | `checkpoints/mobilenetv1_0.50/coreml/mobilenetv1_0.50_float32.zip` | 6204213 | yes | yes | `74baa243d7e51909128dbf12e55c1272a254ec30ba5e99be8b1679c349a5a32b` | `1ae5927997a63c1d838086121fefce2270819c5fb6f026895b1eb2868f7887d5` (yes) |
+| mobilenetv1_0.50 | 12 | `checkpoints/mobilenetv1_0.50/coreml/mobilenetv1_0.50_c12.zip` | 1211878 | yes | yes | `6a49ddf83cb1249f68f2ac96ef383229ff631016376417e1a500262606303545` | `665f2c83ed7d4c347251051934a3c2020229f431c7901da5b684737af1c4f236` (yes) |
+| mobilenetv2 | float32 | `checkpoints/mobilenetv2/coreml/mobilenetv2_float32.zip` | 11632102 | yes | yes | `215efdbd5b0bb99979bddf404c2cefab8562591da350668455c959b0de2e0410` | `ab938ce9d7b20c1db33743efb636b53213079f90bddb546932b88f206e9182da` (yes) |
+| resnet18 | float32 | `checkpoints/resnet18/coreml/resnet18_float32.zip` | 44660612 | yes | yes | `c562002918803f7db011e1661704d62788fbf6c7a8a448cd3f0c53bb978ee25e` | `fed04e69827ff9b6aa6d48d204fc13b0787c1d79c463edff4bd4f1292e098400` (yes) |
+| resnet34 | float32 | `checkpoints/resnet34/coreml/resnet34_float32.zip` | 82210067 | yes | yes | `119acfe615836f893cccc2a72a6c89a8b433efba8a3cf8b65968b9b05ac35959` | `0ea5951532e10485814a6037b8c20e3b498a2d23d44ca6dae1c49ea07cc21944` (yes) |
+| resnet50 | float32 | `checkpoints/resnet50/coreml/resnet50_float32.zip` | 101449135 | yes | yes | `ee2e08cdb46d774ebe2bae2971526fa397d77dd0a4b811a6e24dc1f3b12ffe3f` | `01273cde7b1fa72d280e114ea6fe864f885a07c25a2654e76fc6518935970cf2` (yes) |
 
 The content fingerprint is SHA-256 over the sorted (relative path, SHA-256 of bytes) of every file inside the unpacked `model.mlpackage`, so it identifies the model independently of how it was zipped.
 
 ## Attestation
 
-Digest of the machine-readable result set so far (27 files, all fields above, canonical JSON): `sha256:e0aeb87604d6dd6718282b367f8f3d9053a9dd2dec88c6b790e4bedede3b744f`
+Digest of the machine-readable result set so far (35 files, all fields above, canonical JSON): `sha256:a6fb4fb50feab6dbf2798b847cb96c7a766c1fccad5696638a48e0207efb3e91`
 
 This is a hash binding the results to the files, not a cryptographic signature: no signing key was used.
 
